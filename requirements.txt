@@ -1,0 +1,10 @@
+flask
+torch
+torchvision
+opencv-python
+numpy
+pillow
+geopy
+scikit-learn
+pyyaml
+tqdm
