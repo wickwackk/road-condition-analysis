@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, -webkit-touch-callout=no, -webkit-user-select=none, -khtml-user-select=none, -moz-user-select=none, -ms-user-select=none, user-select=none"
+    />
+    <title>My CesiumJS App - Busan</title>
+    <link href="cesium/Widgets/widgets.css" rel="stylesheet" />
+    <script src="cesium/Cesium.js"></script>
+    <style>
+      html,
+      body,
+      #cesiumContainer {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="cesiumContainer"></div>
+    <script>
+      // Set your Cesium ion default access token
+      Cesium.Ion.defaultAccessToken =
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJjOTk5NTc2Mi0zZjUwLTRmYTQtYWY5MS1lZjcyYmMzNGEyYjEiLCJpZCI6MzIxMDE4LCJpYXQiOjE3NTI2NjI4Njd9.be3VDVnHTUFgkbxYy-HFT3ptGost_nkjT81AVEcoLS4"; // REMEMBER TO REPLACE THIS
+
+      // Initialize the Cesium Viewer
+      const viewer = new Cesium.Viewer("cesiumContainer", {
+        // Options as before
+      });
+
+      // Add a red point over Busan
+      viewer.entities.add({
+        name: "Red point in Busan",
+        position: Cesium.Cartesian3.fromDegrees(129.0756, 35.1796, 500000), // Longitude, Latitude, Altitude (500km)
+        point: {
+          pixelSize: 10,
+          color: Cesium.Color.RED,
+          outlineColor: Cesium.Color.WHITE,
+          outlineWidth: 2,
+        },
+        label: {
+          text: "Busan",
+          font: "14pt monospace",
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          outlineWidth: 2,
+          verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+          pixelOffset: new Cesium.Cartesian2(0, -9),
+        },
+      });
+
+      // Fly the camera to Busan
+      viewer.camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(129.0756, 35.1796, 2000000), // Longitude, Latitude, Altitude (2000km for a wider view)
+        duration: 4, // seconds
+      });
+    </script>
+  </body>
+</html>
