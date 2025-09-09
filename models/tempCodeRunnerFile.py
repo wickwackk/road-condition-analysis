@@ -4,10 +4,7 @@ import torch.optim as optim
 from torchvision import datasets, models, transforms
 from torch.utils.data import DataLoader
 import time
-from torchvision.models import resnet50, ResNet50_Weights
 
-# Use the default pretrained weights
-model = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
 # =========================
 # 1. Data Transforms
 # =========================
