@@ -8,3 +8,5 @@ geopy
 scikit-learn
 pyyaml
 tqdm
+flask
+flask-cors
