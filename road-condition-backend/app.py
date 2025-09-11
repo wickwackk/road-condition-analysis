@@ -6,6 +6,7 @@ import torch
 from torchvision import models, transforms
 import io
 import torch.nn as nn
+import json, os
 
 # =====================
 # Initialize FastAPI
@@ -19,27 +20,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# === EDIT THESE PATHS ===
+CKPT_PATH   = "models/rtk_resnet/resnet18_rtk_best.pth"
+LABELS_PATH = "models/rtk_resnet/class_names.json"
+TS_PATH     = "models/rtk_resnet/resnet18_rtk_scripted.pt"
+
 # =====================
 # Device
 # =====================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+IMG_SIZE = 224
 
 # =====================
-# Load ResNet50
+# Preprocessing
 # =====================
-resnet = models.resnet50(pretrained=False)
-num_ftrs = resnet.fc.in_features
-resnet.fc = nn.Linear(num_ftrs, 4)  # adjust number of classes
-resnet.load_state_dict(torch.load(r"D:\previous\semester 6\grad proj\project1\road-condition-analysis\models\road_resnet50.pth", map_location=device))
-resnet.eval().to(device)
-class_names = ["asphalt", "paved", "unpaved"]  # adjust to your dataset
-
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+preproc = transforms.Compose([
+    transforms.Resize((IMG_SIZE, IMG_SIZE)),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406],
-                         [0.229, 0.224, 0.225])
+    transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                         std =[0.229, 0.224, 0.225]),
 ])
+
+# =====================
+# Load labels
+# =====================
+with open(LABELS_PATH, "r") as f:
+    CLASS_NAMES = json.load(f)
+NUM_CLASSES = len(CLASS_NAMES)
+print("Classes:", CLASS_NAMES)
+
+# =====================
+# Load model
+# =====================
+model = None
+if os.path.isfile(TS_PATH):
+    try:
+        print("Loading TorchScript model:", TS_PATH)
+        model = torch.jit.load(TS_PATH, map_location=device).eval().to(device)
+    except Exception as e:
+        print("TorchScript load failed, falling back to .pth:", e)
+
+if model is None:
+    print("Loading PyTorch checkpoint:", CKPT_PATH)
+    m = models.resnet18(weights=None)
+    m.fc = nn.Linear(m.fc.in_features, NUM_CLASSES)
+    ckpt = torch.load(CKPT_PATH, map_location=device)
+    state = ckpt.get("model_state", ckpt)
+    m.load_state_dict(state)
+    model = m.eval().to(device)
+
+# =====================
+# Prediction function
+# =====================
+@torch.no_grad()
+def predict_pil(img: Image.Image):
+    x = preproc(img).unsqueeze(0).to(device)
+    logits = model(x)
+    probs = torch.softmax(logits, dim=1).squeeze(0).cpu().tolist()
+    i = int(torch.argmax(logits, dim=1))
+    label = CLASS_NAMES[i]
+    road_type, condition = label.split("_", 1) if "_" in label else (label, "unknown")
+    return {
+        "label": label,
+        "type": road_type,
+        "condition": condition,
+        "confidence": float(probs[i]),
+        "probs": {name: float(p) for name, p in zip(CLASS_NAMES, probs)},
+    }
 
 # =====================
 # Load YOLOv8
@@ -67,13 +114,8 @@ def calculate_risk(detections):
 @app.post("/classify")
 async def classify(file: UploadFile = File(...)):
     image = Image.open(io.BytesIO(await file.read())).convert("RGB")
-    img_t = transform(image).unsqueeze(0).to(device)
-    
-    with torch.no_grad():
-        outputs = resnet(img_t)
-        _, preds = torch.max(outputs, 1)
-    
-    return {"surface": class_names[preds.item()]}
+    res = predict_pil(image)
+    return res
 
 # =====================
 # API: Road Damage Detection + Risk Index
@@ -81,10 +123,10 @@ async def classify(file: UploadFile = File(...)):
 @app.post("/risk")
 async def risk(file: UploadFile = File(...)):
     image = Image.open(io.BytesIO(await file.read())).convert("RGB")
-
-    results = yolo.predict(image, conf=0.4)  # YOLOv8 prediction
+    
+    results = yolo.predict(image, conf=0.4)[0]  # YOLOv8 prediction
     detections = []
-    for r in results[0].boxes:
+    for r in results.boxes:
         cls_id = int(r.cls[0])
         conf = float(r.conf[0])
         detections.append({
