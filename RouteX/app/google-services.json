@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "283321788458",
+    "project_id": "routex-40302",
+    "storage_bucket": "routex-40302.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:283321788458:android:c66f7092680a174ea2bb53",
+        "android_client_info": {
+          "package_name": "com.example.routex"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBta14uxADl9VkECeTPB7KYEWtqZukPc0Q"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
