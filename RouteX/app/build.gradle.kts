@@ -53,6 +53,10 @@ android {
 }
 
 dependencies {
+    //Map
+//    implementation("com.google.android.gms:play-services:12.0.1")
+    implementation("com.google.android.gms:play-services-maps:19.2.0")
+    implementation("com.google.android.gms:play-services-location:21.0.1")
 
     // CameraX
     val camerax = "1.4.0" // or latest
