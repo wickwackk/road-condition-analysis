@@ -9,7 +9,7 @@ import kotlinx.coroutines.withContext
 
 import android.Manifest
 import android.annotation.SuppressLint
-import android.content.pm.PackageManager
+import android.content.Intent
 import android.location.Location
 import android.os.Build
 import android.os.Bundle
@@ -34,7 +34,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -63,6 +62,10 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, "Permissions denied", Toast.LENGTH_LONG).show()
         }
     }
+
+//    map
+    private lateinit var mMap: MapsActivity
+
 
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -112,7 +115,8 @@ class MainActivity : AppCompatActivity() {
         // Request runtime permissions (Camera + Fine Location; Write ext storage on P and below)
         val needs = mutableListOf(
             Manifest.permission.CAMERA,
-            Manifest.permission.ACCESS_FINE_LOCATION
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION
         )
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
             needs.add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
@@ -123,6 +127,10 @@ class MainActivity : AppCompatActivity() {
         binding.btnStart.setOnClickListener { startSnappingLoop() }
         binding.btnStop.setOnClickListener { stopSnappingLoop() }
         binding.btnSnap.setOnClickListener { snapOnce() }
+        binding.btnMap.setOnClickListener {
+            val intent = Intent(this, MapsActivity::class.java)
+            startActivity(intent)
+        }
     }
 
     private fun testFirebaseOnce() {
@@ -222,6 +230,8 @@ class MainActivity : AppCompatActivity() {
                         val lat = loc?.latitude
                         val lon = loc?.longitude
 
+                        android.util.Log.d("GEO", "lat=${lat} lon=${lon}")
+
                         // Decode the saved JPG into a moderate bitmap (prevents OOM)
                         val bmp = ImageUtils.decodeDownsampled(photoFile, 640, 640)
 
@@ -286,19 +296,38 @@ class MainActivity : AppCompatActivity() {
     private suspend fun getCurrentLocationOrNull(): Location? {
         val client = LocationServices.getFusedLocationProviderClient(this)
 
-        // Try fast: last known
-        val last = try {
-            client.lastLocation.addOnFailureListener { }.awaitOrNull()
-        } catch (_: Exception) { null }
-        if (last != null) return last
-
-        // Fallback: request a fresh current location
-        return try {
+        // 1) Fresh fix first (best effort)
+        val fresh = try {
             val cts = CancellationTokenSource()
-            client.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, cts.token)
-                .addOnFailureListener { }
-                .awaitOrNull()
+            // cancel after ~3s to avoid blocking your snap loop forever
+            withContext(Dispatchers.IO) {
+                // Use Tasks.await in IO; or wrap with suspendCancellable
+                com.google.android.gms.tasks.Tasks.await(
+                    client.getCurrentLocation(
+                        Priority.PRIORITY_HIGH_ACCURACY,
+                        cts.token
+                    ), 3_000, java.util.concurrent.TimeUnit.MILLISECONDS
+                )
+            }
         } catch (_: Exception) { null }
+
+        if (fresh != null) return fresh
+
+        // 2) Fallback to lastKnown if it's recent (< 2 minutes) and non-zero
+        val last = try {
+            withContext(Dispatchers.IO) {
+                com.google.android.gms.tasks.Tasks.await(client.lastLocation)
+            }
+        } catch (_: Exception) { null }
+
+        if (last != null) {
+            val ageMs = (System.currentTimeMillis() - (last.time ?: 0L))
+            val isRecent = ageMs in 1..120_000
+            val looksValid = !(last.latitude == 0.0 && last.longitude == 0.0)
+            if (isRecent && looksValid) return last
+        }
+
+        return null
     }
 }
 

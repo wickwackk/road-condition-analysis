@@ -37,19 +37,26 @@ class ResnetInference(ctx: Context) {
     }
 
     /** Top-K predictions with softmax probabilities (default K=3). */
+    // ResnetInference.kt
     fun classifyWithProbs(bmp: Bitmap, topK: Int = 3): List<Pred> {
         val m = loadModuleIfNeeded() ?: return listOf(Pred(0, "unknown", 1f))
-        val input = TensorImageUtils.bitmapToFloat32Tensor(
-            bmp,
-            floatArrayOf(0.485f, 0.456f, 0.406f),   // change if you trained with different norm
-            floatArrayOf(0.229f, 0.224f, 0.225f)
-        )
+
+        // 1) Resize to the model's expected size
+        val resized = Bitmap.createScaledBitmap(bmp, 224, 224, true)
+
+        // 2) Choose the normalization that matches training
+        val mean   = floatArrayOf(0.485f, 0.456f, 0.406f)  // try also 0.5f,0.5f,0.5f if needed
+        val std    = floatArrayOf(0.229f, 0.224f, 0.225f)
+
+        val input  = TensorImageUtils.bitmapToFloat32Tensor(resized, mean, std)
         val out: Tensor = m.forward(IValue.from(input)).toTensor()
         val logits = out.dataAsFloatArray
-        val probs = softmax(logits)
-        val idxs = probs.indices.sortedByDescending { probs[it] }.take(topK)
+        val probs  = softmax(logits)
+        val idxs   = probs.indices.sortedByDescending { probs[it] }.take(topK)
+        Log.d("ML", "logits=${logits.size} classes=${labels.size} top=${idxs.joinToString()}")
         return idxs.map { i -> Pred(i, labels.getOrElse(i) { "unknown" }, probs[i]) }
     }
+
 
     /** Back-compat single label. */
     fun classify(bmp: Bitmap): String = classifyWithProbs(bmp, 1).first().label
