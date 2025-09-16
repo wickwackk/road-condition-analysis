@@ -34,6 +34,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -54,6 +55,21 @@ class MainActivity : AppCompatActivity() {
     private var snapJob: Job? = null
     private val snapIntervalMs = 2000L
 
+    //Jamie
+    private val repo by lazy { FirestoreCapturesRepository() }
+
+    private fun loadForMap() {
+        repo.fetchAll { result ->
+            result.onSuccess { list ->
+                list.take(3).forEach {
+                    android.util.Log.d("CAPTURE", "${it.label} @ ${it.lat},${it.lon} conf=${it.conf}")
+                }
+            }.onFailure {
+                android.util.Log.e("CAPTURE", "Fetch error", it)
+            }
+        }
+    }
+
     private val requestPermissions = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { perms ->
@@ -63,8 +79,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-//    map
-    private lateinit var mMap: MapsActivity
+//    map - bubu
+//    private lateinit var mMap: MapsActivity
 
 
 
@@ -128,9 +144,11 @@ class MainActivity : AppCompatActivity() {
         binding.btnStop.setOnClickListener { stopSnappingLoop() }
         binding.btnSnap.setOnClickListener { snapOnce() }
         binding.btnMap.setOnClickListener {
-            val intent = Intent(this, MapsActivity::class.java)
-            startActivity(intent)
+            //val intent = Intent(this, MapsActivity::class.java)
+            //startActivity(intent)
+            startActivity(android.content.Intent(this, MapActivity::class.java))
         }
+        loadForMap()
     }
 
     private fun testFirebaseOnce() {
@@ -292,7 +310,7 @@ class MainActivity : AppCompatActivity() {
         return File(dir, name)
     }
 
-    @SuppressLint("MissingPermission")
+@SuppressLint("MissingPermission")
     private suspend fun getCurrentLocationOrNull(): Location? {
         val client = LocationServices.getFusedLocationProviderClient(this)
 
@@ -340,3 +358,6 @@ private fun <T> com.google.android.gms.tasks.Task<T>.awaitOrNull(): T? {
         null
     }
 }
+
+
+//Jamie

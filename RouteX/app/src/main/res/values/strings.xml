@@ -3,4 +3,10 @@
     <string name="start">Start</string>
     <string name="stop">Stop</string>
     <string name="snap">Snap</string>
+    <string name="map">Map</string>
+    <string name="legend_title">Notations</string>
+    <string name="legend_asphalt">Asphalt</string>
+    <string name="legend_paved">Paved</string>
+    <string name="legend_unpaved">Unpaved</string>
+    <string name="back_to_camera">Back to camera</string>
 </resources>
