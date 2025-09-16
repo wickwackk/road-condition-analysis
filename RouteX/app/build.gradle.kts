@@ -56,7 +56,7 @@ dependencies {
     //Map
 //    implementation("com.google.android.gms:play-services:12.0.1")
     implementation("com.google.android.gms:play-services-maps:19.2.0")
-    implementation("com.google.android.gms:play-services-location:21.0.1")
+//    implementation("com.google.android.gms:play-services-location:21.0.1")
 
     // CameraX
     val camerax = "1.4.0" // or latest
@@ -68,6 +68,9 @@ dependencies {
 
     // Google Play Services Location
     implementation("com.google.android.gms:play-services-location:21.3.0")
+//    implementation("com.google.android.gms:play-services-maps:18.2.0")
+    implementation("com.google.maps.android:android-maps-utils:3.8.0")
+    implementation("com.google.maps.android:android-maps-utils:3.8.2")
 
     // Firebase (BOM to manage versions)
     implementation(platform("com.google.firebase:firebase-bom:33.3.0"))
