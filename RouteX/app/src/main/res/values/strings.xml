@@ -4,9 +4,32 @@
     <string name="stop">Stop</string>
     <string name="snap">Snap</string>
     <string name="map">Map</string>
+    <string name="back">Back</string>
+
+    <string name="legend_title_teaser">Notations…</string>
+
     <string name="legend_title">Notations</string>
-    <string name="legend_asphalt">Asphalt</string>
-    <string name="legend_paved">Paved</string>
-    <string name="legend_unpaved">Unpaved</string>
-    <string name="back_to_camera">Back to camera</string>
+    <string name="legend_asphalt_good">Asphalt - Good</string>
+    <string name="legend_asphalt_regular">Asphalt - Regular</string>
+    <string name="legend_asphalt_bad">Asphalt - Bad</string>
+    <string name="legend_paved_regular">Paved - Regular</string>
+    <string name="legend_paved_bad">Paved</string>
+    <string name="legend_unpaved_regular">Unpaved - Regular</string>
+    <string name="legend_unpaved_bad">Unpaved - Bad</string>
+
+    <string name="back_to_camera">Back</string>
+
+    <string name="classification">Classification: -</string>
+    <string name="confidence">Confidence: -</string>
+
+    <string name="camera_sub">Record/Capture road</string>
+
+    <string name="map_sub">Results &amp; Classified lines</string>
+    <string name="camera_preview_cd">Camera preview</string>
+    <string name="map_preview_cd">Map preview</string>
+    <string name="open_camera">Open Camera</string>
+    <string name="open_map">Open Map</string>
+
+    <string name="bottom_text">2025</string>
+
 </resources>

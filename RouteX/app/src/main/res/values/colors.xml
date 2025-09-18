@@ -1,10 +1,14 @@
-<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="purple_200">#FFBB86FC</color>
-    <color name="purple_500">#FF6200EE</color>
-    <color name="purple_700">#FF3700B3</color>
-    <color name="teal_200">#FF03DAC5</color>
-    <color name="teal_700">#FF018786</color>
-    <color name="black">#FF000000</color>
-    <color name="white">#FFFFFFFF</color>
+    <!-- Asphalt -->
+    <color name="asphalt_good">#00CC00</color>      <!-- dark gray -->
+    <color name="asphalt_regular">#336600</color>   <!-- gray -->
+    <color name="asphalt_bad">#003319</color>       <!-- light gray -->
+
+    <!-- Paved -->
+    <color name="paved_regular">#F9D648</color>     <!-- yellow -->
+    <color name="paved_bad">#F4A300</color>         <!-- yellowish orange -->
+
+    <!-- Unpaved -->
+    <color name="unpaved_regular">#FF9999</color>   <!-- budeg red-->
+    <color name="unpaved_bad">#CC0000</color>       <!-- red -->
 </resources>
