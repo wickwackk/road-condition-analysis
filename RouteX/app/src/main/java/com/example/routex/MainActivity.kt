@@ -39,6 +39,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import com.google.android.material.floatingactionbutton.FloatingActionButton
 
 class MainActivity : AppCompatActivity() {
     // top of class
@@ -143,12 +144,9 @@ class MainActivity : AppCompatActivity() {
         binding.btnStart.setOnClickListener { startSnappingLoop() }
         binding.btnStop.setOnClickListener { stopSnappingLoop() }
         binding.btnSnap.setOnClickListener { snapOnce() }
-        binding.btnMap.setOnClickListener {
-            //val intent = Intent(this, MapsActivity::class.java)
-            //startActivity(intent)
-            startActivity(android.content.Intent(this, MapActivity::class.java))
+        findViewById<FloatingActionButton>(R.id.fabBack).setOnClickListener {
+            finish()
         }
-        loadForMap()
     }
 
     private fun testFirebaseOnce() {

@@ -6,7 +6,10 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.os.Bundle
-import android.widget.Toast
+import android.view.View
+import android.widget.ImageButton
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.annotation.ColorInt
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -16,12 +19,17 @@ import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
 import com.google.android.gms.maps.model.*
+import com.google.android.material.card.MaterialCardView
 import com.google.maps.android.SphericalUtil
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.util.Locale
-import kotlin.math.*
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 class MapActivity : AppCompatActivity(), OnMapReadyCallback {
 
@@ -34,6 +42,17 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
     // cache a tiny colored-dot bitmap per color
     private val dotIconCache = mutableMapOf<Int, BitmapDescriptor>()
 
+    // UI refs
+    private lateinit var btnLegendToggle: View
+    private lateinit var legendCard: MaterialCardView
+
+    private lateinit var infoCard: MaterialCardView
+    private lateinit var infoLine1: TextView
+    private lateinit var infoLine2: TextView
+
+    // track current info target so a second tap hides it
+    private var currentInfoKey: String? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_map)
@@ -41,36 +60,73 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         (supportFragmentManager.findFragmentById(R.id.map) as SupportMapFragment)
             .getMapAsync(this)
 
+        // Back arrow (FAB) -> return to previous screen
         findViewById<com.google.android.material.floatingactionbutton.FloatingActionButton>(R.id.fabBack)
             .setOnClickListener { finish() }
+
+        // Bind legend toggle UI
+        btnLegendToggle = findViewById(R.id.btnLegendToggle)
+        btnLegendToggle.setOnClickListener {
+            legendCard.visibility = if (legendCard.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        }
+        legendCard = findViewById(R.id.legendCard)
+
+        btnLegendToggle.setOnClickListener {
+            legendCard.visibility =
+                if (legendCard.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        }
+
+        // Bind info card
+        infoCard = findViewById(R.id.infoCard)
+        infoLine1 = findViewById(R.id.infoLine1)
+        infoLine2 = findViewById(R.id.infoLine2)
+
+        // Tapping the info card itself also hides it
+        infoCard.setOnClickListener { hideInfoCard() }
     }
 
     override fun onMapReady(googleMap: GoogleMap) {
         map = googleMap.apply {
-            uiSettings.isZoomControlsEnabled = true
-            uiSettings.isMapToolbarEnabled = false
+            uiSettings.apply {
+                isZoomControlsEnabled = true
+                isMapToolbarEnabled = false
+            }
         }
         enableMyLocationIfGranted()
 
+        // Hide info card on map taps or when user starts moving the camera
+        map?.setOnMapClickListener { hideInfoCard() }
+        map?.setOnCameraMoveStartedListener { _ -> hideInfoCard() }
+
+        // Polyline tap -> show average confidence in the bottom info card
         map?.setOnPolylineClickListener { poly ->
-            val meta = poly.tag as? PolyMeta
-            Toast.makeText(
-                this,
-                meta?.let { "${it.label} • avg conf=${"%.2f".format(it.avgConf)}" } ?: "segment",
-                Toast.LENGTH_SHORT
-            ).show()
+            val meta = poly.tag as? PolyMeta ?: return@setOnPolylineClickListener
+            val key = "poly:${meta.label}:${"%.2f".format(meta.avgConf)}:${poly.id}"
+            if (currentInfoKey == key && infoCard.visibility == View.VISIBLE) {
+                hideInfoCard()
+            } else {
+                showInfoCard(
+                    classification = prettyLabel(meta.label),
+                    confidence = meta.avgConf
+                )
+                currentInfoKey = key
+            }
         }
 
+        // Marker tap -> show point confidence in the bottom info card
         map?.setOnMarkerClickListener { mk ->
-            val meta = mk.tag as? DotMeta
-            if (meta != null) {
-                Toast.makeText(
-                    this,
-                    "${meta.label} • conf=${"%.2f".format(meta.conf)}",
-                    Toast.LENGTH_SHORT
-                ).show()
-                true
-            } else false
+            val meta = mk.tag as? DotMeta ?: return@setOnMarkerClickListener false
+            val key = "dot:${meta.label}:${"%.2f".format(meta.conf)}:${mk.position.latitude}:${mk.position.longitude}"
+            if (currentInfoKey == key && infoCard.visibility == View.VISIBLE) {
+                hideInfoCard()
+            } else {
+                showInfoCard(
+                    classification = prettyLabel(meta.label),
+                    confidence = meta.conf
+                )
+                currentInfoKey = key
+            }
+            true
         }
 
         startRealtimeStream()
@@ -89,17 +145,17 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun drawRoadOverlay(items: List<CaptureDoc>) {
         val m = map ?: return
+        hideInfoCard() // ensure no stale info visible when overlays refresh
         m.clear()
 
         val valid = items.filter { !it.lat.isNaN() && !it.lon.isNaN() }
         if (valid.isEmpty()) return
 
-        val byLabel = valid.groupBy { normalizeLabel(it.label) }
+        // Group by the precise, canonical label (e.g., "asphalt_good")
+        val byLabel = valid.groupBy { canonicalLabel(it.label) }
 
         var firstPoint: LatLng? = null
-
-        // rail de-dup set for this draw pass
-        val railSeen = hashSetOf<String>()
+        val railSeen = hashSetOf<String>()  // per-frame rail de-dupe
 
         for ((label, docs) in byLabel) {
             if (docs.isEmpty()) continue
@@ -112,9 +168,10 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
                 )
             }
 
-            // Draw clickable dots
             val color = colorForLabel(label)
             val icon = dotIconForColor(color)
+
+            // Dots (clickable)
             pts.forEach { n ->
                 val mk = m.addMarker(
                     MarkerOptions()
@@ -131,7 +188,7 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
             // Keep one undirected edge between any pair
             val addedPairs = hashSetOf<Pair<Int, Int>>()
 
-            // For each node, choose the nearest candidate, then (optionally) one in opposite direction
+            // For each node, connect to nearest neighbor and (optionally) a second sufficiently different angle
             for (i in pts.indices) {
                 val a = pts[i]
 
@@ -140,7 +197,7 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
                         val b = pts[j]
                         val dist = SphericalUtil.computeDistanceBetween(a.ll, b.ll)
                         if (dist <= CONNECT_THRESHOLD_M) {
-                            val heading = SphericalUtil.computeHeading(a.ll, b.ll) // [-180,180]
+                            val heading = SphericalUtil.computeHeading(a.ll, b.ll) // [-180, 180]
                             add(Nbor(j, dist, heading))
                         }
                     }
@@ -160,11 +217,10 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
                     railSeen = railSeen
                 )
 
-                // 2) a second neighbor that is far enough in angle from the first (to avoid same-direction twin rail)
+                // 2) optional second with angle separation
                 val second = cands.drop(1).firstOrNull { cand ->
                     angleSepDeg(first.headingDeg, cand.headingDeg) >= MIN_ANGLE_DEG
                 }
-
                 if (second != null) {
                     addEdgeOnce(
                         m = m,
@@ -179,11 +235,12 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
             }
         }
 
-        // focus once
-        val fp = firstPoint
-        if (!firstCameraSet && fp != null) {
-            firstCameraSet = true
-            map?.animateCamera(CameraUpdateFactory.newLatLngZoom(fp, 15f))
+        // Focus once on the first point we drew
+        firstPoint?.let { fp ->
+            if (!firstCameraSet) {
+                firstCameraSet = true
+                map?.animateCamera(CameraUpdateFactory.newLatLngZoom(fp, 15f))
+            }
         }
     }
 
@@ -199,7 +256,7 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         val pairKey = if (a.idx < b.idx) a.idx to b.idx else b.idx to a.idx
         if (!addedPairs.add(pairKey)) return
 
-        // ---- rail dedupe: skip if a nearly-parallel edge already occupies this cell ----
+        // Rail de-dupe: skip if a nearly-parallel edge already occupies this cell
         val key = railKey(a.ll, b.ll, label)
         if (!railSeen.add(key)) return
 
@@ -248,21 +305,46 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         return "$label|$hb|$gx|$gy"
     }
 
-    private fun normalizeLabel(raw: String): String {
-        val s = raw.lowercase(Locale.US)
+    /**
+     * Canonicalize labels to the *exact* seven classes you care about.
+     * Any unknowns fall back to "asphalt_regular" (neutral gray).
+     */
+    private fun canonicalLabel(raw: String?): String {
+        val s = raw?.trim()?.lowercase(Locale.US) ?: ""
         return when {
-            s.startsWith("asphalt") -> "asphalt"
-            s.startsWith("unpaved") -> "unpaved"
-            s.startsWith("paved") -> "paved"
-            else -> "other"
+            s.startsWith("asphalt_good")    -> "asphalt_good"
+            s.startsWith("asphalt_regular") -> "asphalt_regular"
+            s.startsWith("asphalt_bad")     -> "asphalt_bad"
+
+            s.startsWith("paved_regular")   -> "paved_regular"
+            s.startsWith("paved_bad")       -> "paved_bad"
+
+            s.startsWith("unpaved_regular") -> "unpaved_regular"
+            s.startsWith("unpaved_bad")     -> "unpaved_bad"
+
+            // If only category comes through (e.g., "asphalt"), treat as "regular"
+            s.startsWith("asphalt")         -> "asphalt_regular"
+            s.startsWith("paved")           -> "paved_regular"
+            s.startsWith("unpaved")         -> "unpaved_regular"
+
+            else                            -> "asphalt_regular"
         }
     }
 
-    private fun colorForLabel(normalized: String): Int = when (normalized) {
-        "asphalt" -> 0xFFFF4444.toInt() // red
-        "unpaved" -> 0xFFFF8800.toInt() // orange
-        "paved"   -> 0xFF2962FF.toInt() // blue
-        else      -> 0xFF555555.toInt() // gray
+    /** Map each canonical label to the exact color from colors.xml. */
+    @ColorInt
+    private fun colorForLabel(canonical: String): Int = when (canonical) {
+        "asphalt_good"    -> ContextCompat.getColor(this, R.color.asphalt_good)      // dark gray
+        "asphalt_regular" -> ContextCompat.getColor(this, R.color.asphalt_regular)   // gray
+        "asphalt_bad"     -> ContextCompat.getColor(this, R.color.asphalt_bad)       // light gray
+
+        "paved_regular"   -> ContextCompat.getColor(this, R.color.paved_regular)     // yellow
+        "paved_bad"       -> ContextCompat.getColor(this, R.color.paved_bad)         // yellowish orange
+
+        "unpaved_regular" -> ContextCompat.getColor(this, R.color.unpaved_regular)   // dark orange
+        "unpaved_bad"     -> ContextCompat.getColor(this, R.color.unpaved_bad)       // reddish orange
+
+        else              -> ContextCompat.getColor(this, R.color.asphalt_regular)
     }
 
     private fun withAlpha(@ColorInt color: Int, alpha: Int = DOT_FILL_ALPHA): Int =
@@ -332,5 +414,29 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         private const val DOT_Z = 1000f
         private const val LINE_Z = 10f
         private const val LINE_WIDTH = 16f
+    }
+
+    // --------- Info card helpers ---------
+
+    private fun showInfoCard(classification: String, confidence: Double) {
+        infoLine1.text = "Classification: $classification"
+        infoLine2.text = "Confidence: ${"%.2f".format(confidence)}"
+        infoCard.visibility = View.VISIBLE
+    }
+
+    private fun hideInfoCard() {
+        infoCard.visibility = View.GONE
+        currentInfoKey = null
+    }
+
+    private fun prettyLabel(canonical: String): String = when (canonicalLabel(canonical)) {
+        "asphalt_good"    -> "Asphalt - Good"
+        "asphalt_regular" -> "Asphalt - Regular"
+        "asphalt_bad"     -> "Asphalt - Bad"
+        "paved_regular"   -> "Paved - Regular"
+        "paved_bad"       -> "Paved - Bad"
+        "unpaved_regular" -> "Unpaved - Regular"
+        "unpaved_bad"     -> "Unpaved - Bad"
+        else              -> "Unclassified"
     }
 }
