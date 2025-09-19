@@ -65,6 +65,13 @@ class FirestoreCapturesRepository {
         }
         awaitClose { reg.remove() }
     }
+
+    fun saveCapture(capture: CaptureDoc, onResult: (Result<Void?>) -> Unit) {
+        col.add(capture)
+            .addOnSuccessListener { onResult(Result.success(null)) }
+            .addOnFailureListener { e -> onResult(Result.failure(e)) }
+    }
+
 }
 
 //fun fetchLatest(limit: Long = 500, onResult: (Result<List<CaptureDoc>>) -> Unit) {
