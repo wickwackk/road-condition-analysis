@@ -38,7 +38,7 @@ object ML {
     private const val MAX_IMAGE_BYTES = 10 * 1024 * 1024 // 10MB
 
     private lateinit var appContext: Context
-    private var datasetId: String = "rtk-road-2025-busan"
+    private var datasetId: String = "routex-2025-busan"
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
