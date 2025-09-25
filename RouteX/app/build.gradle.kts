@@ -2,6 +2,8 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.gms.google-services")
+    // for kotlinx-serialization
+    kotlin("plugin.serialization") version "1.9.0"
 }
 
 android {
@@ -32,11 +34,11 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_1_8
-        targetCompatibility = JavaVersion.VERSION_1_8
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
     }
     kotlinOptions {
-        jvmTarget = "1.8"
+        jvmTarget = "11"
     }
     buildFeatures {
         compose = true
@@ -49,14 +51,34 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        jniLibs {
+            // take the first libc++_shared.so encountered to avoid duplicates
+            pickFirsts += listOf(
+                "lib/arm64-v8a/libc++_shared.so",
+                "lib/armeabi-v7a/libc++_shared.so",
+                "lib/x86_64/libc++_shared.so",
+                "lib/x86/libc++_shared.so"
+            )
+        }
     }
 }
 
 dependencies {
+
+    //Camera fix
+    implementation("com.google.android.gms:play-services-location:21.3.0")
+    // JSON serialization for GeoPose
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
+
+    // (Optional) OpenCV for later QA/sync utilities
+    implementation("org.opencv:opencv:4.12.0")
+
+    implementation("com.google.firebase:firebase-storage")
+    implementation("com.google.firebase:firebase-firestore")
+
     //Map
-//    implementation("com.google.android.gms:play-services:12.0.1")
     implementation("com.google.android.gms:play-services-maps:19.2.0")
-//    implementation("com.google.android.gms:play-services-location:21.0.1")
 
     // CameraX
     val camerax = "1.4.0" // or latest
@@ -67,8 +89,6 @@ dependencies {
     implementation("androidx.camera:camera-video:$camerax")
 
     // Google Play Services Location
-    implementation("com.google.android.gms:play-services-location:21.3.0")
-//    implementation("com.google.android.gms:play-services-maps:18.2.0")
     implementation("com.google.maps.android:android-maps-utils:3.8.0")
     implementation("com.google.maps.android:android-maps-utils:3.8.2")
 

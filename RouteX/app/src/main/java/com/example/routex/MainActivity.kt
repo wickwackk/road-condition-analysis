@@ -1,107 +1,99 @@
-package com.example.routex  // ← change to your namespace if different
-
-import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.storage.FirebaseStorage
-import kotlinx.coroutines.tasks.await
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-
+package com.example.routex
 
 import android.Manifest
-import android.annotation.SuppressLint
+import android.content.ComponentName
 import android.content.Intent
-import android.location.Location
+import android.content.ServiceConnection
 import android.os.Build
 import android.os.Bundle
+import android.os.IBinder
+import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.FileOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
 import com.example.routex.databinding.ActivityMainBinding
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.location.Priority
-import com.google.android.gms.tasks.CancellationTokenSource
+import com.google.android.material.floatingactionbutton.FloatingActionButton
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
-import com.google.android.material.floatingactionbutton.FloatingActionButton
+import java.util.Date
+import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
-    // top of class
-    private lateinit var uploader: FirebaseUploader
-    private lateinit var infer: ResnetInference
-    private lateinit var overlayText: android.widget.TextView
-
 
     private lateinit var binding: ActivityMainBinding
-
     private lateinit var previewView: PreviewView
+
+    // CameraX
+    private var videoCapture: VideoCapture<Recorder>? = null
     private var imageCapture: ImageCapture? = null
+    private var currentRecording: Recording? = null
+    private var videoStartBootNs: Long = 0L
 
-    private var snapJob: Job? = null
-    private val snapIntervalMs = 2000L
+    // Pose service
+    private var poseBuf: PoseBuffer? = null
+    private var svcConn: ServiceConnection? = null
 
-    //Jamie
-    private val repo by lazy { FirestoreCapturesRepository() }
+    // REC badge
+    private lateinit var recBadge: android.widget.TextView
+    private var isRecording = false
 
-    private fun loadForMap() {
-        repo.fetchAll { result ->
-            result.onSuccess { list ->
-                list.take(3).forEach {
-                    android.util.Log.d("CAPTURE", "${it.label} @ ${it.lat},${it.lon} conf=${it.conf}")
-                }
-            }.onFailure {
-                android.util.Log.e("CAPTURE", "Fetch error", it)
-            }
-        }
-    }
+    // Uploader (used by SNAP path)
+    private val uploader by lazy { FirebaseUploader() }
 
+    // Sampling & matching
+    private val sampleFpsExpr = "1"             // UDTIP video frame sampling (1 Hz default)
+    private val maxPoseDeltaNs = 5_000_000_000L // ±5 s tolerance when pairing frame ↔ pose
+
+    // Permissions
     private val requestPermissions = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { perms ->
         val granted = perms.values.all { it }
-        if (granted) startCamera() else {
+        if (!granted) {
             Toast.makeText(this, "Permissions denied", Toast.LENGTH_LONG).show()
+            return@registerForActivityResult
         }
+        startSensorService()
+        startCamera()
     }
-
-//    map - bubu
-//    private lateinit var mMap: MapsActivity
-
-
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        OpenCvManager.ensureInit() // safe no-op if OpenCV not bundled
+
         binding = ActivityMainBinding.inflate(layoutInflater)
-        deleteCachedAsset(this, "resnet_scripted.pt")
-        // Delete any cached model from filesDir (one-time fix)
-        listOf("resnet_scripted.pt", "resnet_scripted.ptl").forEach { name ->
-            try { java.io.File(filesDir, name).delete() } catch (_: Exception) {}
-        }
-
         setContentView(binding.root)
-        uploader = FirebaseUploader(this)
-        infer = ResnetInference(this)
 
-
-
-        // Add PreviewView programmatically (safer for Layout Preview)
+        // Preview
         previewView = PreviewView(this).apply {
+            // Fill center to reduce visible bars in preview (frames match target aspect below)
+            scaleType = PreviewView.ScaleType.FILL_CENTER
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
@@ -109,27 +101,29 @@ class MainActivity : AppCompatActivity() {
         }
         binding.cameraContainer.addView(previewView)
 
-        overlayText = android.widget.TextView(this).apply {
-            text = "—"
-            setPadding(24, 16, 24, 16)
+        // REC badge
+        recBadge = android.widget.TextView(this).apply {
+            text = "● REC"
+            setPadding(24, 12, 24, 12)
             setTextColor(android.graphics.Color.WHITE)
-            setBackgroundColor(0x88000000.toInt()) // semi-transparent black
-            textSize = 20f
+            setBackgroundColor(0x88CC0000.toInt())
+            textSize = 16f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
+            visibility = View.GONE
         }
-        (binding.cameraContainer as android.widget.FrameLayout).addView(
-            overlayText,
-            android.widget.FrameLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
-                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+        (binding.cameraContainer as FrameLayout).addView(
+            recBadge,
+            FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
             ).apply {
-                gravity = android.view.Gravity.TOP or android.view.Gravity.CENTER_HORIZONTAL
+                gravity = android.view.Gravity.TOP or android.view.Gravity.END
                 topMargin = 24
+                rightMargin = 24
             }
         )
 
-
-        // Request runtime permissions (Camera + Fine Location; Write ext storage on P and below)
+        // Ask permissions
         val needs = mutableListOf(
             Manifest.permission.CAMERA,
             Manifest.permission.ACCESS_FINE_LOCATION,
@@ -141,157 +135,180 @@ class MainActivity : AppCompatActivity() {
         requestPermissions.launch(needs.toTypedArray())
 
         // Buttons
-        binding.btnStart.setOnClickListener { startSnappingLoop() }
-        binding.btnStop.setOnClickListener { stopSnappingLoop() }
-        binding.btnSnap.setOnClickListener { snapOnce() }
-        findViewById<FloatingActionButton>(R.id.fabBack).setOnClickListener {
-            finish()
-        }
+        binding.btnStart.setOnClickListener { startRecordingVideo() }
+        binding.btnStop.setOnClickListener { stopRecordingVideo() }
+        binding.btnSnap.setOnClickListener { snapStill() }
+        findViewById<FloatingActionButton>(R.id.fabBack).setOnClickListener { finish() }
     }
 
-    private fun testFirebaseOnce() {
-        lifecycleScope.launch(Dispatchers.IO) {
-            val db = FirebaseFirestore.getInstance()
-            val storage = FirebaseStorage.getInstance().reference
+    override fun onDestroy() {
+        super.onDestroy()
+        currentRecording?.stop()
+        svcConn?.let { unbindService(it) }
+        SensorCaptureService.stop(this)
+    }
 
-            try {
-                val now = System.currentTimeMillis()
+    // ---- Sensor service
 
-                // 1) Firestore test write
-                db.collection("captures")
-                    .document("_healthcheck_$now")
-                    .set(mapOf("ok" to true, "ts" to now, "note" to "hello firestore"))
-                    .await()
-
-                // 2) Storage test upload
-                val bytes = "hello storage @ $now".toByteArray()
-                storage.child("healthchecks/hello_$now.txt").putBytes(bytes).await()
-
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, "Firebase OK ✅", Toast.LENGTH_SHORT).show()
-                }
-            } catch (e: Exception) {
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, "Firebase FAIL: ${e.message}", Toast.LENGTH_LONG).show()
-                }
+    private fun startSensorService() {
+        SensorCaptureService.start(this)
+        svcConn = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+                poseBuf = (binder as? SensorCaptureService.LocalBinder)?.getBuffer()
+                Toast.makeText(this@MainActivity, "Pose service connected", Toast.LENGTH_SHORT).show()
             }
+            override fun onServiceDisconnected(name: ComponentName?) { poseBuf = null }
         }
+        bindService(Intent(this, SensorCaptureService::class.java), svcConn!!, BIND_AUTO_CREATE)
     }
+
+    // ---- CameraX
 
     private fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
         cameraProviderFuture.addListener({
-            val cameraProvider = cameraProviderFuture.get()
+            val provider = cameraProviderFuture.get()
 
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(previewView.surfaceProvider)
-            }
+            val preview = Preview.Builder()
+                .setTargetAspectRatio(AspectRatio.RATIO_4_3) // avoid bars on emulator
+                .build()
+                .also { it.setSurfaceProvider(previewView.surfaceProvider) }
+
+            val recorder = Recorder.Builder()
+                .setQualitySelector(
+                    // Prefer 4:3 SD on emulator; on phones CameraX picks HD/FHD automatically
+                    QualitySelector.fromOrderedList(listOf(Quality.SD, Quality.HD, Quality.FHD))
+                )
+                .build()
+            videoCapture = VideoCapture.withOutput(recorder)
 
             imageCapture = ImageCapture.Builder()
+                .setTargetAspectRatio(AspectRatio.RATIO_4_3)
                 .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                 .build()
 
             val selector = CameraSelector.DEFAULT_BACK_CAMERA
-
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(this, selector, preview, imageCapture)
-            } catch (e: Exception) {
-                e.printStackTrace()
-                Toast.makeText(this, "Failed to bind camera: ${e.message}", Toast.LENGTH_LONG).show()
-            }
+            provider.unbindAll()
+            provider.bindToLifecycle(this, selector, preview, videoCapture, imageCapture)
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun startSnappingLoop() {
-        if (imageCapture == null) {
-            Toast.makeText(this, "Camera not ready yet", Toast.LENGTH_SHORT).show()
+    // ---- Recording
+
+    private fun startRecordingVideo() {
+        val vc = videoCapture ?: run {
+            Toast.makeText(this, "Camera not ready", Toast.LENGTH_SHORT).show()
             return
         }
-        snapJob?.cancel()
-        snapJob = lifecycleScope.launch(Dispatchers.Main) {
-            Toast.makeText(this@MainActivity, "Auto-snap started", Toast.LENGTH_SHORT).show()
-            while (isActive) {
-                snapOnce()
-                delay(snapIntervalMs)
-            }
+        if (currentRecording != null) {
+            Toast.makeText(this, "Already recording", Toast.LENGTH_SHORT).show()
+            return
         }
+
+        val videoFile = outVideoFile()
+        val fileOut = FileOutputOptions.Builder(videoFile).build()
+
+        currentRecording = vc.output
+            .prepareRecording(this, fileOut)
+            // .withAudioEnabled() // keep disabled; not needed here
+            .start(ContextCompat.getMainExecutor(this)) { ev ->
+                when (ev) {
+                    is VideoRecordEvent.Start -> {
+                        videoStartBootNs = TimeUtils.bootNs()
+                        onRecordingStarted()
+                    }
+                    is VideoRecordEvent.Finalize -> {
+                        currentRecording = null
+                        onRecordingStopped()
+                        if (ev.error == VideoRecordEvent.Finalize.ERROR_NONE) {
+                            val path = ev.outputResults.outputUri.path ?: videoFile.absolutePath
+                            // Queue background work so it continues if Activity closes
+                            enqueueVideoPostProcess(path, videoStartBootNs, sampleFpsExpr)
+                        } else {
+                            Toast.makeText(this, "Record error: ${ev.error}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            }
     }
 
-    private fun stopSnappingLoop() {
-        snapJob?.cancel()
-        snapJob = null
-        Toast.makeText(this, "Stopped", Toast.LENGTH_SHORT).show()
+    private fun stopRecordingVideo() {
+        currentRecording?.stop()
     }
 
-    private fun snapOnce() {
-        val capture = imageCapture ?: run {
+    private fun onRecordingStarted() {
+        isRecording = true
+        recBadge.visibility = View.VISIBLE
+        Toast.makeText(this, "Recording started", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun onRecordingStopped() {
+        isRecording = false
+        recBadge.visibility = View.GONE
+        Toast.makeText(this, "Recording stopped", Toast.LENGTH_SHORT).show()
+    }
+
+    // ---- SNAP (single still => GeoPose + upload)
+
+    private fun snapStill() {
+        val ic = imageCapture ?: run {
             Toast.makeText(this, "ImageCapture not ready", Toast.LENGTH_SHORT).show()
             return
         }
 
-        val photoFile = outFile("jpg")
-        val outputOptions = ImageCapture.OutputFileOptions.Builder(photoFile).build()
-        capture.takePicture(
-            outputOptions,
+        val sdf = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
+        val base = "RC_${sdf.format(Date())}"
+        val dir = File(getExternalFilesDir(null), "frames/$base").apply { mkdirs() }
+        val photoFile = File(dir, "${base}_000001.jpg")
+        val output = ImageCapture.OutputFileOptions.Builder(photoFile).build()
+        val tBootNs = TimeUtils.bootNs()
+
+        ic.takePicture(
+            output,
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageSavedCallback {
                 override fun onError(exc: ImageCaptureException) {
-                    Toast.makeText(this@MainActivity, "Capture failed: ${exc.message}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "Snap failed: ${exc.message}", Toast.LENGTH_LONG).show()
                 }
-
                 override fun onImageSaved(result: ImageCapture.OutputFileResults) {
                     lifecycleScope.launch(Dispatchers.IO) {
-                        val loc = getCurrentLocationOrNull()
-                        val lat = loc?.latitude
-                        val lon = loc?.longitude
+                        val pb = poseBuf
+                        val gnss = pb?.nearestGnss(tBootNs)
+                        val quat = pb?.interpQuat(tBootNs) ?: pb?.nearestQuat(tBootNs)
 
-                        android.util.Log.d("GEO", "lat=${lat} lon=${lon}")
-
-                        // Decode the saved JPG into a moderate bitmap (prevents OOM)
-                        val bmp = ImageUtils.decodeDownsampled(photoFile, 640, 640)
-
-// Run on-device inference (ResNet)
-                        // Top-K predictions
-                        val preds = infer.classifyWithProbs(bmp, topK = 3)
-                        val top1 = preds.first()
-                        val label = top1.label
-                        val conf = top1.prob
-
-// Log full dist to Logcat
-                        android.util.Log.d("ML", "preds = " + preds.joinToString { "${it.label}=${"%.2f".format(it.prob)}" })
-
-// Update overlay + Toast on UI
-                        launch(Dispatchers.Main) {
-                            overlayText.text = "${label}  (${(conf*100).toInt()}%)"
-                            Toast.makeText(this@MainActivity, "Label: $label (${(conf*100).toInt()}%)", Toast.LENGTH_SHORT).show()
+                        if (gnss == null || quat == null ||
+                            abs(gnss.tBootNs - tBootNs) > maxPoseDeltaNs) {
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(
+                                    this@MainActivity,
+                                    "No pose for snap (timestamp too far from sensors)",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                            return@launch
                         }
 
-                        val base = photoFile.nameWithoutExtension
-                        val metaTxt = "lat=${lat ?: ""}, lon=${lon ?: ""}, label=$label, conf=${"%.4f".format(conf)}"
+                        val geoFile = File(photoFile.parentFile, "${photoFile.nameWithoutExtension}.geopose.json")
+                        GeoPoseWriter.writeQuaternion(
+                            outFile = geoFile,
+                            id = photoFile.nameWithoutExtension,
+                            timestampISO = TimeUtils.iso8601UTC(gnss.tUtcMs),
+                            lat = gnss.lat, lon = gnss.lon, h = gnss.h ?: 0.0,
+                            quatX = quat.x, quatY = quat.y, quatZ = quat.z, quatW = quat.w,
+                            posStd = gnss.accM?.toDouble(), oriStdDeg = 2.0
+                        )
 
-                        // write sidecar *.txt locally
-                        File(photoFile.parentFile, "$base.txt").writeText(metaTxt)
-
-
-                        // 🔼 upload JPG + TXT + metadata doc
                         try {
-                            uploader.uploadImageWithTxt(
+                            uploader.uploadImageWithGeoPose(
                                 imageFile = photoFile,
-                                txtContent = metaTxt,
-                                meta = mapOf(
-                                    "lat" to (lat ?: Double.NaN),
-                                    "lon" to (lon ?: Double.NaN),
-                                    "label" to label,
-                                    "conf" to conf,
-                                    "ts" to System.currentTimeMillis()
-                                )
+                                geoposeFile = geoFile,
+                                meta = mapOf("ts" to gnss.tUtcMs, "lat" to gnss.lat, "lon" to gnss.lon)
                             )
-                            launch(Dispatchers.Main) {
-                                Toast.makeText(this@MainActivity, "Uploaded ${photoFile.name}", Toast.LENGTH_SHORT).show()
+                            withContext(Dispatchers.Main) {
+                                Toast.makeText(this@MainActivity, "Snap uploaded", Toast.LENGTH_SHORT).show()
                             }
                         } catch (e: Exception) {
-                            launch(Dispatchers.Main) {
+                            withContext(Dispatchers.Main) {
                                 Toast.makeText(this@MainActivity, "Upload failed: ${e.message}", Toast.LENGTH_LONG).show()
                             }
                         }
@@ -301,61 +318,31 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun outFile(ext: String): File {
+    // ---- WorkManager: queue video → frames → GeoPose → upload
+
+    private fun enqueueVideoPostProcess(videoPath: String, startBootNs: Long, fpsExpr: String) {
+        val base = File(videoPath).nameWithoutExtension
+        val data = workDataOf(
+            VideoPostProcessWorker.KEY_VIDEO_PATH to videoPath,
+            VideoPostProcessWorker.KEY_START_BOOT_NS to startBootNs,
+            VideoPostProcessWorker.KEY_FPS_EXPR to fpsExpr
+        )
+        val req = OneTimeWorkRequestBuilder<VideoPostProcessWorker>()
+            .setInputData(data)
+            .build()
+
+        WorkManager.getInstance(applicationContext)
+            .enqueueUniqueWork("postproc_$base", ExistingWorkPolicy.REPLACE, req)
+
+        Toast.makeText(this, "Post-processing queued: $base", Toast.LENGTH_SHORT).show()
+    }
+
+    // ---- utils
+
+    private fun outVideoFile(): File {
         val sdf = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US)
-        val name = "RC_${sdf.format(Date())}.$ext"
-        val dir = File(getExternalFilesDir(null), "captures").apply { mkdirs() }
+        val name = "RC_${sdf.format(Date())}.mp4"
+        val dir = File(getExternalFilesDir(null), "videos").apply { mkdirs() }
         return File(dir, name)
     }
-
-@SuppressLint("MissingPermission")
-    private suspend fun getCurrentLocationOrNull(): Location? {
-        val client = LocationServices.getFusedLocationProviderClient(this)
-
-        // 1) Fresh fix first (best effort)
-        val fresh = try {
-            val cts = CancellationTokenSource()
-            // cancel after ~3s to avoid blocking your snap loop forever
-            withContext(Dispatchers.IO) {
-                // Use Tasks.await in IO; or wrap with suspendCancellable
-                com.google.android.gms.tasks.Tasks.await(
-                    client.getCurrentLocation(
-                        Priority.PRIORITY_HIGH_ACCURACY,
-                        cts.token
-                    ), 3_000, java.util.concurrent.TimeUnit.MILLISECONDS
-                )
-            }
-        } catch (_: Exception) { null }
-
-        if (fresh != null) return fresh
-
-        // 2) Fallback to lastKnown if it's recent (< 2 minutes) and non-zero
-        val last = try {
-            withContext(Dispatchers.IO) {
-                com.google.android.gms.tasks.Tasks.await(client.lastLocation)
-            }
-        } catch (_: Exception) { null }
-
-        if (last != null) {
-            val ageMs = (System.currentTimeMillis() - (last.time ?: 0L))
-            val isRecent = ageMs in 1..120_000
-            val looksValid = !(last.latitude == 0.0 && last.longitude == 0.0)
-            if (isRecent && looksValid) return last
-        }
-
-        return null
-    }
 }
-
-/* ---------- Simple Task<T>.awaitOrNull() helper without extra deps ---------- */
-private fun <T> com.google.android.gms.tasks.Task<T>.awaitOrNull(): T? {
-    // NOTE: This blocks the calling thread until completion. We call it from Dispatchers.IO.
-    return try {
-        com.google.android.gms.tasks.Tasks.await(this)
-    } catch (_: Exception) {
-        null
-    }
-}
-
-
-//Jamie
