@@ -193,18 +193,18 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
                 )
 
                 // Draw FOV polygon
-                val fovAngle = 30.0
-                val fovLength = 15.0
-                val left = SphericalUtil.computeOffset(n.ll, fovLength, euler.yaw - fovAngle / 2 + euler.pitch)
-                val right = SphericalUtil.computeOffset(n.ll, fovLength, euler.yaw + fovAngle / 2 + euler.pitch)
-                m.addPolygon(
-                    PolygonOptions()
-                        .add(n.ll, left, right)
-                        .fillColor(withAlpha(color, 50))
-                        .strokeColor(color)
-                        .strokeWidth(2f)
-                        .zIndex(LINE_Z)
-                )
+//                val fovAngle = 30.0
+//                val fovLength = 15.0
+//                val left = SphericalUtil.computeOffset(n.ll, fovLength, euler.yaw - fovAngle / 2 + euler.pitch)
+//                val right = SphericalUtil.computeOffset(n.ll, fovLength, euler.yaw + fovAngle / 2 + euler.pitch)
+//                m.addPolygon(
+//                    PolygonOptions()
+//                        .add(n.ll, left, right)
+//                        .fillColor(withAlpha(color, 50))
+//                        .strokeColor(color)
+//                        .strokeWidth(2f)
+//                        .zIndex(LINE_Z)
+//                )
             }
 
             // 2️⃣ Add edges between nearest neighbors
