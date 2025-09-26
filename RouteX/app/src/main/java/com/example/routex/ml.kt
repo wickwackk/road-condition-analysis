@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 object ML {
 
     private const val TAG = "ML"
-    private const val INTERVAL_MS = 1500L
+    private const val INTERVAL_MS = 5000L
     private const val BATCH_LIMIT = 60           // per tick
     private const val MAX_IMAGE_BYTES = 10 * 1024 * 1024 // 10MB
 
