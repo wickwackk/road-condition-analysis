@@ -1,18 +1,17 @@
 package com.example.routex
-
+import coil.load
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.os.Bundle
+import android.util.Log
 import android.view.View
-import android.widget.ImageButton
-import android.widget.LinearLayout
+import android.widget.ImageView
 import android.widget.TextView
 import androidx.annotation.ColorInt
 import androidx.appcompat.app.AppCompatActivity
-import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -21,11 +20,13 @@ import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
 import com.google.android.gms.maps.model.*
 import com.google.android.material.card.MaterialCardView
+import com.google.firebase.ktx.Firebase
+import com.google.firebase.storage.ktx.storage
+
 import com.google.maps.android.SphericalUtil
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
@@ -40,21 +41,16 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
     private var streamJob: Job? = null
     private var firstCameraSet = false
 
-    // cache a tiny colored-dot bitmap per color
     private val dotIconCache = mutableMapOf<Int, BitmapDescriptor>()
 
-    // UI refs
     private lateinit var btnLegendToggle: View
     private lateinit var legendCard: MaterialCardView
-
     private lateinit var infoCard: MaterialCardView
     private lateinit var infoLine1: TextView
     private lateinit var infoLine2: TextView
+    private lateinit var infoImage: ImageView
 
-    // track current info target so a second tap hides it
     private var currentInfoKey: String? = null
-
-    
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -63,28 +59,20 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         (supportFragmentManager.findFragmentById(R.id.map) as SupportMapFragment)
             .getMapAsync(this)
 
-        // Back arrow (FAB) -> return to previous screen
         findViewById<com.google.android.material.floatingactionbutton.FloatingActionButton>(R.id.fabBack)
             .setOnClickListener { finish() }
 
-        // Bind legend toggle UI
         btnLegendToggle = findViewById(R.id.btnLegendToggle)
+        legendCard = findViewById(R.id.legendCard)
         btnLegendToggle.setOnClickListener {
             legendCard.visibility = if (legendCard.visibility == View.VISIBLE) View.GONE else View.VISIBLE
         }
-        legendCard = findViewById(R.id.legendCard)
 
-        btnLegendToggle.setOnClickListener {
-            legendCard.visibility =
-                if (legendCard.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        }
-
-        // Bind info card
         infoCard = findViewById(R.id.infoCard)
         infoLine1 = findViewById(R.id.infoLine1)
         infoLine2 = findViewById(R.id.infoLine2)
+        infoImage = findViewById(R.id.infoImage)
 
-        // Tapping the info card itself also hides it
         infoCard.setOnClickListener { hideInfoCard() }
     }
 
@@ -97,38 +85,25 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         }
         enableMyLocationIfGranted()
 
-        
-
-        // Hide info card on map taps or when user starts moving the camera
         map?.setOnMapClickListener { hideInfoCard() }
-        map?.setOnCameraMoveStartedListener { _ -> hideInfoCard() }
+        map?.setOnCameraMoveStartedListener { hideInfoCard() }
 
-        // Polyline tap -> show average confidence in the bottom info card
         map?.setOnPolylineClickListener { poly ->
             val meta = poly.tag as? PolyMeta ?: return@setOnPolylineClickListener
             val key = "poly:${meta.label}:${"%.2f".format(meta.avgConf)}:${poly.id}"
-            if (currentInfoKey == key && infoCard.visibility == View.VISIBLE) {
-                hideInfoCard()
-            } else {
-                showInfoCard(
-                    classification = prettyLabel(meta.label),
-                    confidence = meta.avgConf
-                )
+            if (currentInfoKey == key && infoCard.visibility == View.VISIBLE) hideInfoCard()
+            else {
+                showInfoCard(prettyLabel(meta.label), meta.avgConf, null)
                 currentInfoKey = key
             }
         }
 
-        // Marker tap -> show point confidence in the bottom info card
         map?.setOnMarkerClickListener { mk ->
             val meta = mk.tag as? DotMeta ?: return@setOnMarkerClickListener false
             val key = "dot:${meta.label}:${"%.2f".format(meta.conf)}:${mk.position.latitude}:${mk.position.longitude}"
-            if (currentInfoKey == key && infoCard.visibility == View.VISIBLE) {
-                hideInfoCard()
-            } else {
-                showInfoCard(
-                    classification = prettyLabel(meta.label),
-                    confidence = meta.conf
-                )
+            if (currentInfoKey == key && infoCard.visibility == View.VISIBLE) hideInfoCard()
+            else {
+                showInfoCard(prettyLabel(meta.label), meta.conf, meta.imagePath)
                 currentInfoKey = key
             }
             true
@@ -146,18 +121,16 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         }
     }
 
-    // ---------------- drawing ----------------
-
     private fun drawRoadOverlay(items: List<CaptureDoc>) {
         val m = map ?: return
-        hideInfoCard() // hide stale info
+        hideInfoCard()
         m.clear()
 
         val valid = items.filter { !it.lat.isNaN() && !it.lon.isNaN() }
         if (valid.isEmpty()) return
 
         var firstPoint: LatLng? = null
-        val railSeen = hashSetOf<String>()  // rail dedupe
+        val railSeen = hashSetOf<String>()
         val byLabel = valid.groupBy { canonicalLabel(it.label) }
 
         for ((label, docs) in byLabel) {
@@ -166,12 +139,11 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
             val icon = dotIconForColor(color)
 
             val pts = docs.mapIndexed { idx, d ->
-                Node(idx, LatLng(d.lat, d.lon), d.conf, d.h, d.qx, d.qy, d.qz, d.qw).also {
+                Node(idx, LatLng(d.lat, d.lon), d.conf, d.h, d.qx, d.qy, d.qz, d.qw, d.imagePath).also {
                     if (firstPoint == null) firstPoint = it.ll
                 }
             }
 
-            // 1️⃣ Add markers for each point
             pts.forEach { n ->
                 val marker = m.addMarker(
                     MarkerOptions()
@@ -179,9 +151,8 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
                         .icon(icon)
                         .anchor(0.5f, 0.5f)
                 )
-                marker?.tag = DotMeta(label, n.conf)
+                marker?.tag = DotMeta(label, n.conf, n.imagePath)
 
-                // Draw arrow for heading
                 val euler = quaternionToEuler(n.x, n.y, n.z, n.w)
                 val arrowEnd = SphericalUtil.computeOffset(n.ll, 10.0, euler.yaw)
                 m.addPolyline(
@@ -191,58 +162,36 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
                         .width(4f)
                         .zIndex(LINE_Z + 1)
                 )
-
-                // Draw FOV polygon
-//                val fovAngle = 30.0
-//                val fovLength = 15.0
-//                val left = SphericalUtil.computeOffset(n.ll, fovLength, euler.yaw - fovAngle / 2 + euler.pitch)
-//                val right = SphericalUtil.computeOffset(n.ll, fovLength, euler.yaw + fovAngle / 2 + euler.pitch)
-//                m.addPolygon(
-//                    PolygonOptions()
-//                        .add(n.ll, left, right)
-//                        .fillColor(withAlpha(color, 50))
-//                        .strokeColor(color)
-//                        .strokeWidth(2f)
-//                        .zIndex(LINE_Z)
-//                )
             }
 
-            // 2️⃣ Add edges between nearest neighbors
             val addedPairs = hashSetOf<Pair<Int, Int>>()
             for (i in pts.indices) {
                 val a = pts[i]
-                val cands = buildList {
-                    for (j in pts.indices) if (j != i) {
-                        val b = pts[j]
-                        val dist = SphericalUtil.computeDistanceBetween(a.ll, b.ll)
-                        if (dist <= CONNECT_THRESHOLD_M) {
-                            val heading = SphericalUtil.computeHeading(a.ll, b.ll)
-                            add(Nbor(j, dist, heading))
-                        }
-                    }
-                }.sortedBy { it.dist }
+                val cands = pts.indices.filter { it != i }.map { j ->
+                    val b = pts[j]
+                    val dist = SphericalUtil.computeDistanceBetween(a.ll, b.ll)
+                    val heading = SphericalUtil.computeHeading(a.ll, b.ll)
+                    Nbor(j, dist, heading)
+                }.filter { it.dist <= CONNECT_THRESHOLD_M }.sortedBy { it.dist }
 
                 if (cands.isEmpty()) continue
 
-                val first = cands.first()
-                addEdgeOnce(m, a, pts[first.idx], label, color, addedPairs, railSeen)
+                addEdgeOnce(m, a, pts[cands.first().idx], label, color, addedPairs, railSeen)
 
                 val second = cands.drop(1).firstOrNull { cand ->
-                    angleSepDeg(first.headingDeg, cand.headingDeg) >= MIN_ANGLE_DEG
+                    angleSepDeg(cands.first().headingDeg, cand.headingDeg) >= MIN_ANGLE_DEG
                 }
                 if (second != null) addEdgeOnce(m, a, pts[second.idx], label, color, addedPairs, railSeen)
             }
         }
 
-        // 3️⃣ Move camera to first point
-        firstPoint?.let { fp ->
+        firstPoint?.let {
             if (!firstCameraSet) {
                 firstCameraSet = true
-                map?.animateCamera(CameraUpdateFactory.newLatLngZoom(fp, 15f))
+                map?.animateCamera(CameraUpdateFactory.newLatLngZoom(it, 15f))
             }
         }
     }
-
 
     private fun addEdgeOnce(
         m: GoogleMap,
@@ -256,7 +205,6 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         val pairKey = if (a.idx < b.idx) a.idx to b.idx else b.idx to a.idx
         if (!addedPairs.add(pairKey)) return
 
-        // Rail de-dupe: skip if a nearly-parallel edge already occupies this cell
         val key = railKey(a.ll, b.ll, label)
         if (!railSeen.add(key)) return
 
@@ -274,30 +222,24 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         poly.tag = PolyMeta(label, (a.conf + b.conf) / 2.0)
     }
 
-    // ---------------- utils ----------------
-
     private fun angleSepDeg(a: Double, b: Double): Double {
         val d = abs(a - b)
         return if (d > 180.0) 360.0 - d else d
     }
 
-    /** Make a coarse key for an edge’s “rail”: quantize midpoint + heading. */
     private fun railKey(a: LatLng, b: LatLng, label: String): String {
         val midLat = (a.latitude + b.latitude) / 2.0
         val midLng = (a.longitude + b.longitude) / 2.0
 
-        // meters per degree
         val metersPerDegLat = 111_320.0
         val metersPerDegLng = metersPerDegLat * cos(Math.toRadians(midLat))
 
-        // convert quantization from meters -> degrees at this latitude
         val cellDegLat = RAIL_CELL_M / metersPerDegLat
         val cellDegLng = RAIL_CELL_M / metersPerDegLng
 
         val gy = (midLat / cellDegLat).roundToLong()
         val gx = (midLng / cellDegLng).roundToLong()
 
-        // heading bucket (ignore direction: 0..180)
         val h = abs(SphericalUtil.computeHeading(a, b))
         val heading180 = if (h > 180.0) 360.0 - h else h
         val hb = (heading180 / BEARING_BIN_DEG).roundToInt()
@@ -305,46 +247,33 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         return "$label|$hb|$gx|$gy"
     }
 
-    /**
-     * Canonicalize labels to the *exact* seven classes you care about.
-     * Any unknowns fall back to "asphalt_regular" (neutral gray).
-     */
     private fun canonicalLabel(raw: String?): String {
-        val s = raw?.trim()?.lowercase(Locale.US) ?: ""
+        val s = raw?.trim()?.lowercase() ?: ""
         return when {
-            s.startsWith("asphalt_good")    -> "asphalt_good"
+            s.startsWith("asphalt_good") -> "asphalt_good"
             s.startsWith("asphalt_regular") -> "asphalt_regular"
-            s.startsWith("asphalt_bad")     -> "asphalt_bad"
-
-            s.startsWith("paved_regular")   -> "paved_regular"
-            s.startsWith("paved_bad")       -> "paved_bad"
-
+            s.startsWith("asphalt_bad") -> "asphalt_bad"
+            s.startsWith("paved_regular") -> "paved_regular"
+            s.startsWith("paved_bad") -> "paved_bad"
             s.startsWith("unpaved_regular") -> "unpaved_regular"
-            s.startsWith("unpaved_bad")     -> "unpaved_bad"
-
-            // If only category comes through (e.g., "asphalt"), treat as "regular"
-            s.startsWith("asphalt")         -> "asphalt_regular"
-            s.startsWith("paved")           -> "paved_regular"
-            s.startsWith("unpaved")         -> "unpaved_regular"
-
-            else                            -> "asphalt_regular"
+            s.startsWith("unpaved_bad") -> "unpaved_bad"
+            s.startsWith("asphalt") -> "asphalt_regular"
+            s.startsWith("paved") -> "paved_regular"
+            s.startsWith("unpaved") -> "unpaved_regular"
+            else -> "asphalt_regular"
         }
     }
 
-    /** Map each canonical label to the exact color from colors.xml. */
     @ColorInt
     private fun colorForLabel(canonical: String): Int = when (canonical) {
-        "asphalt_good"    -> ContextCompat.getColor(this, R.color.asphalt_good)      // dark gray
-        "asphalt_regular" -> ContextCompat.getColor(this, R.color.asphalt_regular)   // gray
-        "asphalt_bad"     -> ContextCompat.getColor(this, R.color.asphalt_bad)       // light gray
-
-        "paved_regular"   -> ContextCompat.getColor(this, R.color.paved_regular)     // yellow
-        "paved_bad"       -> ContextCompat.getColor(this, R.color.paved_bad)         // yellowish orange
-
-        "unpaved_regular" -> ContextCompat.getColor(this, R.color.unpaved_regular)   // dark orange
-        "unpaved_bad"     -> ContextCompat.getColor(this, R.color.unpaved_bad)       // reddish orange
-
-        else              -> ContextCompat.getColor(this, R.color.asphalt_regular)
+        "asphalt_good" -> ContextCompat.getColor(this, R.color.asphalt_good)
+        "asphalt_regular" -> ContextCompat.getColor(this, R.color.asphalt_regular)
+        "asphalt_bad" -> ContextCompat.getColor(this, R.color.asphalt_bad)
+        "paved_regular" -> ContextCompat.getColor(this, R.color.paved_regular)
+        "paved_bad" -> ContextCompat.getColor(this, R.color.paved_bad)
+        "unpaved_regular" -> ContextCompat.getColor(this, R.color.unpaved_regular)
+        "unpaved_bad" -> ContextCompat.getColor(this, R.color.unpaved_bad)
+        else -> ContextCompat.getColor(this, R.color.asphalt_regular)
     }
 
     private fun withAlpha(@ColorInt color: Int, alpha: Int = DOT_FILL_ALPHA): Int =
@@ -376,10 +305,9 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         max(1, (dp * resources.displayMetrics.density).roundToInt())
 
     private fun enableMyLocationIfGranted() {
-        val granted = ContextCompat.checkSelfPermission(
-            this, Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
-        if (granted) map?.isMyLocationEnabled = true
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
+            == PackageManager.PERMISSION_GRANTED
+        ) map?.isMyLocationEnabled = true
     }
 
     override fun onDestroy() {
@@ -387,61 +315,86 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
         super.onDestroy()
     }
 
-    // ---------------- data & tunables ----------------
-
     private data class EulerAngles(val yaw: Double, val pitch: Double, val roll: Double)
-
     private fun quaternionToEuler(x: Double, y: Double, z: Double, w: Double): EulerAngles {
-        // roll (x-axis rotation)
-        val t0 = +2.0 * (w * x + y * z)
-        val t1 = +1.0 - 2.0 * (x * x + y * y)
+        val t0 = 2.0 * (w * x + y * z)
+        val t1 = 1.0 - 2.0 * (x * x + y * y)
         val roll = Math.toDegrees(Math.atan2(t0, t1))
 
-        // pitch (y-axis rotation)
-        var t2 = +2.0 * (w * y - z * x)
+        var t2 = 2.0 * (w * y - z * x)
         t2 = t2.coerceIn(-1.0, 1.0)
         val pitch = Math.toDegrees(Math.asin(t2))
 
-        // yaw (z-axis rotation)
-        val t3 = +2.0 * (w * z + x * y)
-        val t4 = +1.0 - 2.0 * (y * y + z * z)
+        val t3 = 2.0 * (w * z + x * y)
+        val t4 = 1.0 - 2.0 * (y * y + z * z)
         val yaw = Math.toDegrees(Math.atan2(t3, t4))
 
         return EulerAngles(yaw, pitch, roll)
     }
 
-    private data class Node(val idx: Int, val ll: LatLng, val conf: Double, val h: Double, val x: Double, val y: Double, val z: Double , val w: Double)
+    private data class Node(
+        val idx: Int,
+        val ll: LatLng,
+        val conf: Double,
+        val h: Double,
+        val x: Double,
+        val y: Double,
+        val z: Double,
+        val w: Double,
+        val imagePath: String?
+    )
+
     private data class Nbor(val idx: Int, val dist: Double, val headingDeg: Double)
     private data class PolyMeta(val label: String, val avgConf: Double)
-    private data class DotMeta(val label: String, val conf: Double)
+    private data class DotMeta(val label: String, val conf: Double, val imagePath: String?)
 
     companion object {
-        // Distance within which points can connect (meters)
         private const val CONNECT_THRESHOLD_M = 200.0
-
-        // Require the optional second neighbor to differ in heading by at least this (deg)
         private const val MIN_ANGLE_DEG = 100.0
-
-        // Rail dedupe: spatial cell size and heading bucket (tune to be stricter/looser)
-        private const val RAIL_CELL_M = 8.0            // merge rails within ~8 m
-        private const val BEARING_BIN_DEG = 12.0       // merge rails if heading within ~12°
-
-        // Dot appearance
+        private const val RAIL_CELL_M = 8.0
+        private const val BEARING_BIN_DEG = 12.0
         private const val DOT_DP = 16f
         private const val DOT_STROKE_DP = 2.5f
-        private const val DOT_FILL_ALPHA = 0x66 // 0..255
-
-        // Z and width
+        private const val DOT_FILL_ALPHA = 0x66
         private const val DOT_Z = 1000f
         private const val LINE_Z = 10f
         private const val LINE_WIDTH = 16f
     }
 
-    // --------- Info card helpers ---------
-
-    private fun showInfoCard(classification: String, confidence: Double) {
+    private fun showInfoCard(classification: String, confidence: Double, imagePath: String?) {
         infoLine1.text = "Classification: $classification"
         infoLine2.text = "Confidence: ${"%.2f".format(confidence)}"
+
+        if (!imagePath.isNullOrEmpty()) {
+            infoImage.visibility = View.VISIBLE
+
+            // Check if path is a gs:// URL
+            if (imagePath.startsWith("gs://")) {
+                val storageRef = Firebase.storage.getReferenceFromUrl(imagePath)
+                storageRef.downloadUrl
+                    .addOnSuccessListener { uri ->
+                        // Load image via Coil once we have the https URL
+                        infoImage.load(uri) {
+                            placeholder(R.drawable.ic_placeholder)
+                            error(R.drawable.ic_error)
+                        }
+                    }
+                    .addOnFailureListener { e ->
+                        Log.e("MapActivity", "Failed to get download URL", e)
+                        infoImage.setImageResource(R.drawable.ic_error)
+                    }
+            } else {
+                // If it's already an https URL
+                infoImage.load(imagePath) {
+                    placeholder(R.drawable.ic_placeholder)
+                    error(R.drawable.ic_error)
+                }
+            }
+
+        } else {
+            infoImage.visibility = View.GONE
+        }
+
         infoCard.visibility = View.VISIBLE
     }
 
@@ -451,13 +404,13 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
     }
 
     private fun prettyLabel(canonical: String): String = when (canonicalLabel(canonical)) {
-        "asphalt_good"    -> "Asphalt - Good"
+        "asphalt_good" -> "Asphalt - Good"
         "asphalt_regular" -> "Asphalt - Regular"
-        "asphalt_bad"     -> "Asphalt - Bad"
-        "paved_regular"   -> "Paved - Regular"
-        "paved_bad"       -> "Paved - Bad"
+        "asphalt_bad" -> "Asphalt - Bad"
+        "paved_regular" -> "Paved - Regular"
+        "paved_bad" -> "Paved - Bad"
         "unpaved_regular" -> "Unpaved - Regular"
-        "unpaved_bad"     -> "Unpaved - Bad"
-        else              -> "Unclassified"
+        "unpaved_bad" -> "Unpaved - Bad"
+        else -> "Unclassified"
     }
 }

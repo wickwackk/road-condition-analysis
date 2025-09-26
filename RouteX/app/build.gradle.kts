@@ -64,7 +64,7 @@ android {
 }
 
 dependencies {
-
+    implementation("io.coil-kt:coil:2.4.0")
     //Camera fix
     implementation("com.google.android.gms:play-services-location:21.3.0")
     // JSON serialization for GeoPose
