@@ -101,6 +101,11 @@ class MainActivity : AppCompatActivity() {
         }
         binding.cameraContainer.addView(previewView)
 
+        TDML.start(this, datasetId="routex-2025-busan")
+        ML.start(this, datasetId="routex-2025-busan")
+
+
+
         // REC badge
         recBadge = android.widget.TextView(this).apply {
             text = "● REC"
