@@ -1,5 +1,7 @@
 package com.example.routex
 
+import com.google.firebase.Timestamp
+
 data class CaptureDoc(
 
     val label: String = "",

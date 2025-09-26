@@ -1,10 +1,9 @@
 package com.example.routex
 
-import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.Query
-import com.google.firebase.ktx.Firebase
-import com.google.firebase.firestore.ktx.firestore
+import android.util.Log
 import com.google.firebase.firestore.DocumentSnapshot
+import com.google.firebase.firestore.ktx.firestore
+import com.google.firebase.ktx.Firebase
 import com.google.firebase.storage.FirebaseStorage
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.callbackFlow
@@ -14,37 +13,35 @@ import org.json.JSONObject
 
 class FirestoreCapturesRepository {
 
-    private val col = Firebase.firestore.collection("captures")
+    private val TAG = "FirestoreCapturesRepo"
+
+    private val samplesCol = Firebase.firestore
+        .collection("tdmlDatasets")
+        .document("routex-2025-busan")
+        .collection("samples")
+
     private val storage = FirebaseStorage.getInstance().reference
-    // --- robust mapper: tolerates Timestamp or Long; "conf" or "confidence" ---
-    private suspend fun mapDoc(doc: DocumentSnapshot): CaptureDoc {
-        val label     = doc.getString("label") ?: ""
-        val conf      = doc.getDouble("conf") ?: doc.getDouble("confidence") ?: 0.0
 
+    private suspend fun mapLabelWithSample(labelDoc: DocumentSnapshot): CaptureDoc? {
+        val labelMap = labelDoc.data ?: return null
+        val sampleId = labelMap["sampleId"] as? String ?: return null
+        val clazz = labelMap["class"] as? String ?: ""
+        val score = (labelMap["score"] as? Number)?.toDouble() ?: 0.0
 
-        // SAFELY handle mixed types for "ts"
-        val tsAny = doc.get("ts")
-        val tsMillis = when (tsAny) {
-            is com.google.firebase.Timestamp -> tsAny.toDate().time
-            is java.util.Date               -> tsAny.time
-            is Number                       -> tsAny.toLong()
-            else                            -> 0L
-        }
+        val sampleDoc = samplesCol.document(sampleId).get().await()
+        val inputs = sampleDoc.get("inputs") as? Map<*, *> ?: emptyMap<Any, Any>()
+        val image = inputs["image"] as? Map<*, *>
+        val geopose = inputs["geopose"] as? Map<*, *>
 
-        val imagePath = doc.getString("imagePath") ?: ""
-        val txtPath   = doc.getString("txtPath")
-        val deviceId  = doc.getString("deviceId")
-        val modelVer  = doc.getString("modelVer")
-
-        val id = doc.getString("id")?:""
-        val geoposePath = doc.getString("geoposePath")?.replaceFirst("geoPOSE", "GeoPOSE") ?: ""
-        var lat       = doc.getDouble("lat") ?: 0.0
-        var lon       =  doc.getDouble("lon") ?: 0.0
-        var h       =  0.0
-        var qx       =  0.0
-        var qy       =  0.0
-        var qz       =  0.0
-        var qw       =  0.0
+        var lat = 0.0
+        var lon = 0.0
+        var h = 0.0
+        var qx = 0.0
+        var qy = 0.0
+        var qz = 0.0
+        var qw = 0.0
+        val geoposeHref = geopose?.get("href") as? String ?: ""
+        val geoposePath = geoposeHref.removePrefix("gs://routex-40302.firebasestorage.app/")
 
         if (geoposePath.isNotEmpty()) {
             try {
@@ -61,87 +58,53 @@ class FirestoreCapturesRepository {
                     qz = it.optDouble("z", qz)
                     qw = it.optDouble("w", qw)
                 }
-            } catch (e: Exception) { e.printStackTrace()
-                }
+
+                // --- LOG GeoPose data ---
+                Log.d(TAG, "SampleID: $sampleId")
+                Log.d(TAG, "GeoPose Path: $geoposePath")
+                Log.d(TAG, "Position -> lat: $lat, lon: $lon, h: $h")
+                Log.d(TAG, "Quaternion -> x: $qx, y: $qy, z: $qz, w: $qw")
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to fetch GeoPose for $sampleId", e)
+            }
         }
+
+        val imagePath = image?.get("href") as? String ?: ""
+
         return CaptureDoc(
-            label = label,
-            conf = conf,
+            label = clazz,
+            conf = score,
             lat = lat,
             lon = lon,
-            ts = tsMillis,
+            ts = (labelMap["createdAt"] as? com.google.firebase.Timestamp)?.toDate()?.time ?: 0L,
             imagePath = imagePath,
-            txtPath = txtPath,
-            deviceId = deviceId,
-            modelVer = modelVer,
-
-            id = id,
+            txtPath = null,
+            deviceId = sampleDoc.getString("metadata.source"),
+            modelVer = null,
+            id = sampleId,
             geoposePath = geoposePath,
             h = h,
             qx = qx,
             qy = qy,
             qz = qz,
             qw = qw
-
         )
     }
 
-    // Fetch once
-
-    suspend fun fetchAll(): List<CaptureDoc> {
-        val snap = col.get().await()
-        return snap.documents.map { mapDoc(it) }.sortedBy { it.ts }
-    }
-
-//    fun fetchAll(onResult: (Result<List<CaptureDoc>>) -> Unit) {
-//        col.get()
-//            .addOnSuccessListener { snap ->
-//                val list = snap.documents.map { mapDoc(it) }.sortedBy { it.ts }
-//                onResult(Result.success(list))
-//            }
-//            .addOnFailureListener { e -> onResult(Result.failure(e)) }
-//    }
     fun streamAll() = callbackFlow<List<CaptureDoc>> {
-        val reg = col.addSnapshotListener { snap, err ->
+        val labelsCol = Firebase.firestore
+            .collection("tdmlDatasets")
+            .document("routex-2025-busan")
+            .collection("labels")
+
+        val reg = labelsCol.addSnapshotListener { snap, err ->
             if (err != null) { close(err); return@addSnapshotListener }
             launch {
-                val list = snap?.documents?.map { mapDoc(it) } ?: emptyList()
+                val list = snap?.documents?.mapNotNull { mapLabelWithSample(it) } ?: emptyList()
                 trySend(list.sortedBy { it.ts })
             }
         }
         awaitClose { reg.remove() }
     }
-//    fun streamAll() = callbackFlow<List<CaptureDoc>> {
-//        val reg = col.addSnapshotListener { snap, err ->
-//            if (err != null) { close(err); return@addSnapshotListener }
-//            val list = (snap?.documents?.map { mapDoc(it) } ?: emptyList())
-//                .sortedBy { it.ts }
-//            trySend(list)
-//        }
-//        awaitClose { reg.remove() }
-//    }
-
-    fun saveCapture(capture: CaptureDoc, onResult: (Result<Void?>) -> Unit) {
-        col.add(capture)
-            .addOnSuccessListener { onResult(Result.success(null)) }
-            .addOnFailureListener { e -> onResult(Result.failure(e)) }
-    }
-
 }
-
-//fun fetchLatest(limit: Long = 500, onResult: (Result<List<CaptureDoc>>) -> Unit) {
-//    col.orderBy("ts", Query.Direction.DESCENDING).limit(limit)
-//        .get()
-//        .addOnSuccessListener { s ->
-//            onResult(Result.success(s.documents.mapNotNull { it.toObject(CaptureDoc::class.java) }))
-//        }
-//        .addOnFailureListener { e -> onResult(Result.failure(e)) }
-//}
-//
-//fun streamLatest(limit: Long = 500) = callbackFlow<List<CaptureDoc>> {
-//    val reg = col.orderBy("ts", Query.Direction.DESCENDING).limit(limit)
-//        .addSnapshotListener { snap, _ ->
-//            trySend(snap?.documents?.mapNotNull { it.toObject(CaptureDoc::class.java) } ?: emptyList())
-//        }
-//    awaitClose { reg.remove() }
-//}
