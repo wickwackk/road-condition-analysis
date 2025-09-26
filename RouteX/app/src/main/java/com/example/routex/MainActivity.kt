@@ -43,6 +43,11 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.Date
 import kotlin.math.abs
+import androidx.lifecycle.lifecycleScope
+import com.google.firebase.auth.ktx.auth
+import com.google.firebase.ktx.Firebase
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 
 class MainActivity : AppCompatActivity() {
 
@@ -101,8 +106,17 @@ class MainActivity : AppCompatActivity() {
         }
         binding.cameraContainer.addView(previewView)
 
-        TDML.start(this, datasetId="routex-2025-busan")
-        ML.start(this, datasetId="routex-2025-busan")
+        lifecycleScope.launch {
+            try {
+                if (Firebase.auth.currentUser == null) {
+                    Firebase.auth.signInAnonymously().await()
+                }
+                TDML.start(this@MainActivity, datasetId = "routex-2025-busan")
+                ML.start(this@MainActivity,   datasetId = "routex-2025-busan")
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
 
 
 

@@ -33,8 +33,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 object ML {
 
     private const val TAG = "ML"
-    private const val INTERVAL_MS = 5000L
-    private const val BATCH_LIMIT = 60           // per tick
+    private const val INTERVAL_MS = 1500L
+    private const val BATCH_LIMIT = 200           // per tick
     private const val MAX_IMAGE_BYTES = 10 * 1024 * 1024 // 10MB
 
     private lateinit var appContext: Context
@@ -47,6 +47,13 @@ object ML {
     // Firebase handles
     private val db get() = Firebase.firestore
     private val storage get() = Firebase.storage
+
+    //Added
+
+    private const val RETRY_BACKOFF_MS = 5000L
+
+    private val nextRetryAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
 
     // Your model wrapper
     @Volatile private var infer: ResnetInference? = null
@@ -99,7 +106,7 @@ object ML {
     private suspend fun tickOnce() {
         val samples = db.collection("tdmlDatasets").document(datasetId)
             .collection("samples")
-            .orderBy("metadata.capturedAt")
+            .orderBy("metadata.capturedAt", com.google.firebase.firestore.Query.Direction.DESCENDING)
             .limit(BATCH_LIMIT.toLong())
             .get().await()
 
@@ -112,18 +119,25 @@ object ML {
             if (!running.get()) break
 
             val sampleId = doc.id
+
+            val now = android.os.SystemClock.elapsedRealtime()
+            val nr = nextRetryAt[sampleId]
+            if (nr != null && now < nr) continue
+
             if (recentlyTried.contains(sampleId)) continue
 
             // skip if label already exists
             val labelRef = db.document("tdmlDatasets/$datasetId/labels/$sampleId")
             if (labelRef.get().await().exists()) {
                 recentlyTried.add(sampleId)
+                nextRetryAt.remove(sampleId)
                 continue
             }
 
             val imgHrefAny = doc.get("inputs.image.href")
             if (imgHrefAny !is String) {
-                recentlyTried.add(sampleId)
+                //recentlyTried.add(sampleId)
+                nextRetryAt[sampleId] = android.os.SystemClock.elapsedRealtime() + RETRY_BACKOFF_MS
                 continue
             }
             val imgHref = imgHrefAny as String
@@ -133,14 +147,16 @@ object ML {
                 val bytes = storage.getReferenceFromUrl(imgHref).getBytes(MAX_IMAGE_BYTES.toLong()).await()
                 val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 if (bmp == null) {
-                    recentlyTried.add(sampleId)
+                    //recentlyTried.add(sampleId)
+                    nextRetryAt[sampleId] = android.os.SystemClock.elapsedRealtime() + RETRY_BACKOFF_MS
                     continue
                 }
 
                 // run your ResnetInference (top-1)
                 val top1 = ensureInfer().classifyWithProbs(bmp, topK = 1).firstOrNull()
                 if (top1 == null) {
-                    recentlyTried.add(sampleId)
+                    //recentlyTried.add(sampleId)
+                    nextRetryAt[sampleId] = android.os.SystemClock.elapsedRealtime() + RETRY_BACKOFF_MS
                     continue
                 }
                 val predClass = top1.label
@@ -161,6 +177,8 @@ object ML {
                 )
 
                 labelRef.set(labelDoc).await()
+                nextRetryAt.remove(sampleId)
+
 
                 labeled++
                 recentlyTried.add(sampleId)
