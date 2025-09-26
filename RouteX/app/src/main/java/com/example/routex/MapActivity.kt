@@ -150,48 +150,40 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
 
     private fun drawRoadOverlay(items: List<CaptureDoc>) {
         val m = map ?: return
-        hideInfoCard() // ensure no stale info visible when overlays refresh
+        hideInfoCard() // hide stale info
         m.clear()
 
         val valid = items.filter { !it.lat.isNaN() && !it.lon.isNaN() }
         if (valid.isEmpty()) return
 
-        // Group by the precise, canonical label (e.g., "asphalt_good")
-        val byLabel = valid.groupBy { canonicalLabel(it.label) }
-
         var firstPoint: LatLng? = null
-        val railSeen = hashSetOf<String>()  // per-frame rail de-dupe
+        val railSeen = hashSetOf<String>()  // rail dedupe
+        val byLabel = valid.groupBy { canonicalLabel(it.label) }
 
         for ((label, docs) in byLabel) {
             if (docs.isEmpty()) continue
-
-            val pts = docs.mapIndexed { idx, d ->
-                Node(
-                    idx = idx,
-                    ll = LatLng(d.lat, d.lon),
-                    conf = d.conf,
-                    h = d.h,
-                    x = d.qx,
-                    y = d.qy,
-                    z = d.qz,
-                    w = d.qw
-                )
-            }
-
             val color = colorForLabel(label)
             val icon = dotIconForColor(color)
 
-            // Dots (clickable)
+            val pts = docs.mapIndexed { idx, d ->
+                Node(idx, LatLng(d.lat, d.lon), d.conf, d.h, d.qx, d.qy, d.qz, d.qw).also {
+                    if (firstPoint == null) firstPoint = it.ll
+                }
+            }
+
+            // 1️⃣ Add markers for each point
             pts.forEach { n ->
+                val marker = m.addMarker(
+                    MarkerOptions()
+                        .position(n.ll)
+                        .icon(icon)
+                        .anchor(0.5f, 0.5f)
+                )
+                marker?.tag = DotMeta(label, n.conf)
+
+                // Draw arrow for heading
                 val euler = quaternionToEuler(n.x, n.y, n.z, n.w)
-                val heading = euler.yaw
-                val tiltPitch = euler.pitch
-                val tiltRoll = euler.roll
-
-                val arrowLengthM = 10.0
-
-                // Apply yaw for map heading
-                val arrowEnd = SphericalUtil.computeOffset(n.ll, arrowLengthM, heading)
+                val arrowEnd = SphericalUtil.computeOffset(n.ll, 10.0, euler.yaw)
                 m.addPolyline(
                     PolylineOptions()
                         .add(n.ll, arrowEnd)
@@ -200,13 +192,11 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
                         .zIndex(LINE_Z + 1)
                 )
 
-                // Optional: adjust FOV cone points using pitch/roll
+                // Draw FOV polygon
                 val fovAngle = 30.0
                 val fovLength = 15.0
-
-                // simple approximation: tilt the left/right points by pitch (north/south)
-                val left = SphericalUtil.computeOffset(n.ll, fovLength, heading - fovAngle / 2 + tiltPitch)
-                val right = SphericalUtil.computeOffset(n.ll, fovLength, heading + fovAngle / 2 + tiltPitch)
+                val left = SphericalUtil.computeOffset(n.ll, fovLength, euler.yaw - fovAngle / 2 + euler.pitch)
+                val right = SphericalUtil.computeOffset(n.ll, fovLength, euler.yaw + fovAngle / 2 + euler.pitch)
                 m.addPolygon(
                     PolygonOptions()
                         .add(n.ll, left, right)
@@ -217,22 +207,16 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
                 )
             }
 
-
-
-
-            // Keep one undirected edge between any pair
+            // 2️⃣ Add edges between nearest neighbors
             val addedPairs = hashSetOf<Pair<Int, Int>>()
-
-            // For each node, connect to nearest neighbor and (optionally) a second sufficiently different angle
             for (i in pts.indices) {
                 val a = pts[i]
-
                 val cands = buildList {
                     for (j in pts.indices) if (j != i) {
                         val b = pts[j]
                         val dist = SphericalUtil.computeDistanceBetween(a.ll, b.ll)
                         if (dist <= CONNECT_THRESHOLD_M) {
-                            val heading = SphericalUtil.computeHeading(a.ll, b.ll) // [-180, 180]
+                            val heading = SphericalUtil.computeHeading(a.ll, b.ll)
                             add(Nbor(j, dist, heading))
                         }
                     }
@@ -240,37 +224,17 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
 
                 if (cands.isEmpty()) continue
 
-                // 1) nearest
                 val first = cands.first()
-                addEdgeOnce(
-                    m = m,
-                    a = a,
-                    b = pts[first.idx],
-                    label = label,
-                    color = color,
-                    addedPairs = addedPairs,
-                    railSeen = railSeen
-                )
+                addEdgeOnce(m, a, pts[first.idx], label, color, addedPairs, railSeen)
 
-                // 2) optional second with angle separation
                 val second = cands.drop(1).firstOrNull { cand ->
                     angleSepDeg(first.headingDeg, cand.headingDeg) >= MIN_ANGLE_DEG
                 }
-                if (second != null) {
-                    addEdgeOnce(
-                        m = m,
-                        a = a,
-                        b = pts[second.idx],
-                        label = label,
-                        color = color,
-                        addedPairs = addedPairs,
-                        railSeen = railSeen
-                    )
-                }
+                if (second != null) addEdgeOnce(m, a, pts[second.idx], label, color, addedPairs, railSeen)
             }
         }
 
-        // Focus once on the first point we drew
+        // 3️⃣ Move camera to first point
         firstPoint?.let { fp ->
             if (!firstCameraSet) {
                 firstCameraSet = true
@@ -278,6 +242,7 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
             }
         }
     }
+
 
     private fun addEdgeOnce(
         m: GoogleMap,

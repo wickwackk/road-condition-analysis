@@ -37,9 +37,9 @@ class FirestoreCapturesRepository {
         val modelVer  = doc.getString("modelVer")
 
         val id = doc.getString("id")?:""
-        val geoposePath = doc.getString("geoposePath") ?: ""
-        var lat       =  0.0
-        var lon       =  0.0
+        val geoposePath = doc.getString("geoposePath")?.replaceFirst("geoPOSE", "GeoPOSE") ?: ""
+        var lat       = doc.getDouble("lat") ?: 0.0
+        var lon       =  doc.getDouble("lon") ?: 0.0
         var h       =  0.0
         var qx       =  0.0
         var qy       =  0.0
@@ -62,13 +62,7 @@ class FirestoreCapturesRepository {
                     qw = it.optDouble("w", qw)
                 }
             } catch (e: Exception) { e.printStackTrace()
-                lat = 35.1796   // Busan latitude
-                lon = 129.0756  // Busan longitude
-                h = 0.0
-                qx = 0.0
-                qy = 0.0
-                qz = 0.0
-                qw = 0.0}
+                }
         }
         return CaptureDoc(
             label = label,
