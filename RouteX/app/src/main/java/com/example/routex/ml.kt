@@ -11,6 +11,67 @@ import kotlinx.coroutines.tasks.await
 import java.time.Instant
 import java.util.concurrent.atomic.AtomicBoolean
 
+import org.json.JSONObject
+import kotlin.math.*
+
+private fun yprDegToQuat(yawDeg: Double, pitchDeg: Double, rollDeg: Double): DoubleArray {
+    // Convert ZYX (yaw, pitch, roll in degrees) to quaternion (x, y, z, w)
+    val cy = cos(Math.toRadians(yawDeg)   * 0.5)
+    val sy = sin(Math.toRadians(yawDeg)   * 0.5)
+    val cp = cos(Math.toRadians(pitchDeg) * 0.5)
+    val sp = sin(Math.toRadians(pitchDeg) * 0.5)
+    val cr = cos(Math.toRadians(rollDeg)  * 0.5)
+    val sr = sin(Math.toRadians(rollDeg)  * 0.5)
+
+    val w = cr*cp*cy + sr*sp*sy
+    val x = sr*cp*cy - cr*sp*sy
+    val y = cr*sp*cy + sr*cp*sy
+    val z = cr*cp*sy - sr*sp*cy
+    return doubleArrayOf(x, y, z, w)
+}
+
+private fun parseGeoPose(bytes: ByteArray): ParsedPose {
+    val s = bytes.toString(Charsets.UTF_8)
+    val j = JSONObject(s)
+
+    // Basic structures you generate:
+    // - BasicQuaternion: { position:{lat,lon,h}, quaternion:{x,y,z,w}, ... }
+    // - BasicYpr:        { position:{lat,lon,h}, yprAngles:{yaw,pitch,roll}, ... }
+    val pos = j.optJSONObject("position") ?: JSONObject()
+    val lat = pos.optDouble("lat", Double.NaN)
+    val lon = pos.optDouble("lon", Double.NaN)
+    val h   = pos.optDouble("h",   0.0)
+
+    val qObj = j.optJSONObject("quaternion")
+    val (qx, qy, qz, qw) =
+        if (qObj != null) {
+            listOf(
+                qObj.optDouble("x", 0.0),
+                qObj.optDouble("y", 0.0),
+                qObj.optDouble("z", 0.0),
+                qObj.optDouble("w", 1.0)
+            )
+        } else {
+            val ypr = j.optJSONObject("yprAngles")
+            if (ypr != null) {
+                val yaw = ypr.optDouble("yaw", 0.0)
+                val pit = ypr.optDouble("pitch", 0.0)
+                val rol = ypr.optDouble("roll", 0.0)
+                val q = yprDegToQuat(yaw, pit, rol)
+                listOf(q[0], q[1], q[2], q[3])
+            } else listOf(0.0, 0.0, 0.0, 1.0)
+        }
+
+    return ParsedPose(lat, lon, h, qx, qy, qz, qw)
+}
+
+private data class ParsedPose(
+    val lat: Double, val lon: Double, val h: Double,
+    val qx: Double, val qy: Double, val qz: Double, val qw: Double
+)
+
+
+
 /**
  * ML auto-labeler (TDML-compliant):
  * Call ML.start(context, DATASET_ID) once (e.g., in Application.onCreate()).
@@ -142,6 +203,12 @@ object ML {
             }
             val imgHref = imgHrefAny as String
 
+            val poseHref = (doc.get("inputs.geopose.href") as? String) ?: ""
+
+            val poseBytes = Firebase.storage.getReferenceFromUrl(poseHref)
+                .getBytes(64 * 1024).await()
+            val pose = parseGeoPose(poseBytes)
+
             try {
                 // download image
                 val bytes = storage.getReferenceFromUrl(imgHref).getBytes(MAX_IMAGE_BYTES.toLong()).await()
@@ -173,7 +240,14 @@ object ML {
                             "score" to score
                         )
                     ),
-                    "createdAt" to com.google.firebase.Timestamp.now()
+                    "createdAt" to com.google.firebase.Timestamp.now(),
+
+                    "lat" to pose.lat, "lon" to pose.lon, "h" to pose.h,
+                    "qx" to pose.qx, "qy" to pose.qy, "qz" to pose.qz, "qw" to pose.qw,
+
+                    // NEW: direct hrefs to resources (optional but handy)
+                    "imageHref" to imgHref,
+                    "geoposeHref" to poseHref
                 )
 
                 labelRef.set(labelDoc).await()
