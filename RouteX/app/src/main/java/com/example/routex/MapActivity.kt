@@ -12,6 +12,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.annotation.ColorInt
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.gms.maps.CameraUpdateFactory
@@ -53,6 +54,8 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
     // track current info target so a second tap hides it
     private var currentInfoKey: String? = null
 
+    
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_map)
@@ -93,6 +96,8 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
             }
         }
         enableMyLocationIfGranted()
+
+        
 
         // Hide info card on map taps or when user starts moving the camera
         map?.setOnMapClickListener { hideInfoCard() }
@@ -164,7 +169,12 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
                 Node(
                     idx = idx,
                     ll = LatLng(d.lat, d.lon),
-                    conf = d.conf
+                    conf = d.conf,
+                    h = d.h,
+                    x = d.qx,
+                    y = d.qy,
+                    z = d.qz,
+                    w = d.qw
                 )
             }
 
@@ -173,17 +183,42 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
 
             // Dots (clickable)
             pts.forEach { n ->
-                val mk = m.addMarker(
-                    MarkerOptions()
-                        .position(n.ll)
-                        .icon(icon)
-                        .anchor(0.5f, 0.5f)
-                        .zIndex(DOT_Z)
-                        .flat(true)
+                val euler = quaternionToEuler(n.x, n.y, n.z, n.w)
+                val heading = euler.yaw
+                val tiltPitch = euler.pitch
+                val tiltRoll = euler.roll
+
+                val arrowLengthM = 10.0
+
+                // Apply yaw for map heading
+                val arrowEnd = SphericalUtil.computeOffset(n.ll, arrowLengthM, heading)
+                m.addPolyline(
+                    PolylineOptions()
+                        .add(n.ll, arrowEnd)
+                        .color(color)
+                        .width(4f)
+                        .zIndex(LINE_Z + 1)
                 )
-                mk?.tag = DotMeta(label, n.conf)
-                if (firstPoint == null) firstPoint = n.ll
+
+                // Optional: adjust FOV cone points using pitch/roll
+                val fovAngle = 30.0
+                val fovLength = 15.0
+
+                // simple approximation: tilt the left/right points by pitch (north/south)
+                val left = SphericalUtil.computeOffset(n.ll, fovLength, heading - fovAngle / 2 + tiltPitch)
+                val right = SphericalUtil.computeOffset(n.ll, fovLength, heading + fovAngle / 2 + tiltPitch)
+                m.addPolygon(
+                    PolygonOptions()
+                        .add(n.ll, left, right)
+                        .fillColor(withAlpha(color, 50))
+                        .strokeColor(color)
+                        .strokeWidth(2f)
+                        .zIndex(LINE_Z)
+                )
             }
+
+
+
 
             // Keep one undirected edge between any pair
             val addedPairs = hashSetOf<Pair<Int, Int>>()
@@ -389,7 +424,28 @@ class MapActivity : AppCompatActivity(), OnMapReadyCallback {
 
     // ---------------- data & tunables ----------------
 
-    private data class Node(val idx: Int, val ll: LatLng, val conf: Double)
+    private data class EulerAngles(val yaw: Double, val pitch: Double, val roll: Double)
+
+    private fun quaternionToEuler(x: Double, y: Double, z: Double, w: Double): EulerAngles {
+        // roll (x-axis rotation)
+        val t0 = +2.0 * (w * x + y * z)
+        val t1 = +1.0 - 2.0 * (x * x + y * y)
+        val roll = Math.toDegrees(Math.atan2(t0, t1))
+
+        // pitch (y-axis rotation)
+        var t2 = +2.0 * (w * y - z * x)
+        t2 = t2.coerceIn(-1.0, 1.0)
+        val pitch = Math.toDegrees(Math.asin(t2))
+
+        // yaw (z-axis rotation)
+        val t3 = +2.0 * (w * z + x * y)
+        val t4 = +1.0 - 2.0 * (y * y + z * z)
+        val yaw = Math.toDegrees(Math.atan2(t3, t4))
+
+        return EulerAngles(yaw, pitch, roll)
+    }
+
+    private data class Node(val idx: Int, val ll: LatLng, val conf: Double, val h: Double, val x: Double, val y: Double, val z: Double , val w: Double)
     private data class Nbor(val idx: Int, val dist: Double, val headingDeg: Double)
     private data class PolyMeta(val label: String, val avgConf: Double)
     private data class DotMeta(val label: String, val conf: Double)
