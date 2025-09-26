@@ -20,14 +20,33 @@ class FirestoreCapturesRepository {
         .document("routex-2025-busan")
         .collection("samples")
 
+    private val labelsCol = Firebase.firestore
+        .collection("tdmlDatasets")
+        .document("routex-2025-busan")
+        .collection("labels")
+
     private val storage = FirebaseStorage.getInstance().reference
 
     private suspend fun mapLabelWithSample(labelDoc: DocumentSnapshot): CaptureDoc? {
-        val labelMap = labelDoc.data ?: return null
-        val sampleId = labelMap["sampleId"] as? String ?: return null
-        val clazz = labelMap["class"] as? String ?: ""
-        val score = (labelMap["score"] as? Number)?.toDouble() ?: 0.0
+        val labelMap = labelDoc.data ?: run {
+            Log.w(TAG, "Label document empty: ${labelDoc.id}")
+            return null
+        }
 
+        val sampleId = labelMap["sampleId"] as? String ?: run {
+            Log.w(TAG, "Label document missing sampleId: ${labelDoc.id}")
+            return null
+        }
+
+        // --- Label info ---
+        val annotations = labelMap["annotations"] as? List<Map<String, Any>> ?: emptyList()
+        val firstAnnotation = annotations.firstOrNull() ?: emptyMap()
+
+        val clazz = firstAnnotation["class"] as? String ?: ""
+        val score = (firstAnnotation["score"] as? Number)?.toDouble() ?: 0.0
+        val target = firstAnnotation["target"] as? String ?: ""
+
+        // --- Sample info ---
         val sampleDoc = samplesCol.document(sampleId).get().await()
         val inputs = sampleDoc.get("inputs") as? Map<*, *> ?: emptyMap<Any, Any>()
         val image = inputs["image"] as? Map<*, *>
@@ -40,6 +59,7 @@ class FirestoreCapturesRepository {
         var qy = 0.0
         var qz = 0.0
         var qw = 0.0
+
         val geoposeHref = geopose?.get("href") as? String ?: ""
         val geoposePath = geoposeHref.removePrefix("gs://routex-40302.firebasestorage.app/")
 
@@ -58,19 +78,23 @@ class FirestoreCapturesRepository {
                     qz = it.optDouble("z", qz)
                     qw = it.optDouble("w", qw)
                 }
-
-                // --- LOG GeoPose data ---
-                Log.d(TAG, "SampleID: $sampleId")
-                Log.d(TAG, "GeoPose Path: $geoposePath")
-                Log.d(TAG, "Position -> lat: $lat, lon: $lon, h: $h")
-                Log.d(TAG, "Quaternion -> x: $qx, y: $qy, z: $qz, w: $qw")
-
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to fetch GeoPose for $sampleId", e)
             }
         }
 
         val imagePath = image?.get("href") as? String ?: ""
+
+        // --- Logging ---
+//        Log.d(TAG, "SampleID: $sampleId")
+        Log.d(TAG, "Label: $clazz")
+        Log.d(TAG, "Target: $target")
+        Log.d(TAG, "Confidence Score: $score")
+//        Log.d(TAG, "GeoPose Path: $geoposePath")
+//        Log.d(TAG, "Position -> lat: $lat, lon: $lon, h: $h")
+//        Log.d(TAG, "Quaternion -> x: $qx, y: $qy, z: $qz, w: $qw")
+//        Log.d(TAG, "Image Path: $imagePath")
+//        Log.d(TAG, "Device: ${sampleDoc.getString("metadata.source")}")
 
         return CaptureDoc(
             label = clazz,
@@ -93,13 +117,12 @@ class FirestoreCapturesRepository {
     }
 
     fun streamAll() = callbackFlow<List<CaptureDoc>> {
-        val labelsCol = Firebase.firestore
-            .collection("tdmlDatasets")
-            .document("routex-2025-busan")
-            .collection("labels")
-
         val reg = labelsCol.addSnapshotListener { snap, err ->
-            if (err != null) { close(err); return@addSnapshotListener }
+            if (err != null) {
+                Log.e(TAG, "Failed to listen to labels collection", err)
+                close(err)
+                return@addSnapshotListener
+            }
             launch {
                 val list = snap?.documents?.mapNotNull { mapLabelWithSample(it) } ?: emptyList()
                 trySend(list.sortedBy { it.ts })
